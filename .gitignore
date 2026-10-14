@@ -1,0 +1,10 @@
+handoff/
+*.gam
+*.gbz
+*.min
+*.dist
+*.zipcodes
+*.fa
+*.fq
+*.fastq
+*.gz
