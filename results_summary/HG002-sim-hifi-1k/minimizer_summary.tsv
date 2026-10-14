@@ -1,0 +1,5 @@
+name	reads	picked_minimizers	kept_minimizers	kept_minimizer_hits	kept_minimizers_per_read	mean_hits_per_kept_minimizer
+mini_k31w20	988	1574009	108972	337758	110.296	3.09949
+sync_k31s11	988	1599144	108970	432547	110.294	3.96941
+miniW_k31w20	988	1590776	108968	261981	110.291	2.4042
+default_k31w50W	988	655535	108964	615272	110.287	5.64656

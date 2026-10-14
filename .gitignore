@@ -8,3 +8,4 @@ handoff/
 *.fq
 *.fastq
 *.gz
+__pycache__/

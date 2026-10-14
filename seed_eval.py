@@ -24,16 +24,27 @@ Stages:
   density  giraffe --track-provenance on --reads; per-read seed counts
   filters  one small job: per-filter pass/fail totals and kept minimizers from the density run
   collect  (runs locally, no sbatch) parse logs of all stages into
-           results/<reads>/results.tsv and results/<reads>/comparison.png
+           results/<reads>/results.tsv and results/<reads>/comparison.png;
+           --snapshot also copies the summaries to results_summary/<reads>/ in this repo
+
+Index provenance: each index job writes indexes/<name>.params (vg binary and
+version, index_args, graph). index/map/density refuse to run, both when
+generating scripts and again inside the job, if that file disagrees with the
+condition's row, so a row whose index_args changed without a new name cannot
+silently reuse an old index.
 """
 import argparse
 import csv
+import functools
 import math
 import re
+import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
+REPO_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path("/private/groups/patenlab/twang285/seed-eval")
 GRAPH_NAME = "hprc-v2.0-mc-chm13-eval-sampled16o_fragmentlinked-for-real-hifi-HG002-full"
 GBZ = DATA_DIR / f"{GRAPH_NAME}.gbz"
@@ -90,11 +101,70 @@ def index_prefix(c):
     return DATA_DIR / "indexes" / c["name"]
 
 
-def require_index(c):
+@functools.lru_cache(maxsize=None)
+def vg_version(vg_binary):
+    """First line of `vg version`, e.g. 'vg version v1.77.0-26-gc91cc1d91 "Ruby"'."""
+    result = subprocess.run([vg_binary, "version"], check=True, capture_output=True, text=True)
+    return result.stdout.splitlines()[0].strip()
+
+
+@functools.lru_cache(maxsize=None)
+def git_commit():
+    """Short HEAD commit of this repo, with -dirty if the driver or conditions table has uncommitted edits."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(REPO_DIR), *args], check=True, capture_output=True, text=True).stdout
+    dirty = git("status", "--porcelain", "--", "seed_eval.py", "conditions.tsv").strip()
+    return git("rev-parse", "--short", "HEAD").strip() + ("-dirty" if dirty else "")
+
+
+def index_params(c):
+    """Expected contents of indexes/<name>.params for this condition."""
+    return (f"vg_binary={c['vg_binary']}\n"
+            f"vg_version={vg_version(c['vg_binary'])}\n"
+            f"index_args={c['index_args']}\n"
+            f"gbz={GBZ}\n"
+            f"dist={DIST}\n")
+
+
+def check_index_params(c, stage, force):
+    """Compare indexes/<name>.params with the row. Returns False if the index stage can be skipped."""
     out = index_prefix(c)
-    return f"""for f in {out}.min {out}.zipcodes; do
+    params = Path(f"{out}.params")
+    if params.is_file():
+        if params.read_text() != index_params(c):
+            sys.exit(f"{c['name']}: {params} does not match conditions.tsv.\n"
+                     f"  on disk:\n{params.read_text()}  expected:\n{index_params(c)}"
+                     "Give the changed row a new name, or delete the old index files.")
+        if stage == "index" and not force:
+            print(f"[{c['name']}] index already built with these parameters; skipping (use --force to rebuild)")
+            return False
+        return True
+    if stage == "index":
+        if Path(f"{out}.min").exists() and not force:
+            sys.exit(f"{c['name']}: {out}.min exists but has no .params; cannot tell how it was built. "
+                     "Delete it or pass --force to rebuild.")
+        return True
+    sys.exit(f"{c['name']}: no {params}; run the index stage first")
+
+
+def require_index(c):
+    """Job-time check that the index on disk was built with this row's parameters."""
+    out = index_prefix(c)
+    return f"""EXPECTED_PARAMS=$(cat <<'PARAMS'
+{index_params(c)}PARAMS
+)
+[ "$(cat {out}.params 2>/dev/null)" = "$EXPECTED_PARAMS" ] || {{
+    echo "{out}.params missing or does not match this condition; rebuild or rename the index" >&2; exit 1; }}
+for f in {out}.min {out}.zipcodes; do
     [ -s "$f" ] || {{ echo "missing index file $f; run the index stage first" >&2; exit 1; }}
 done
+"""
+
+
+def run_info(c, o):
+    """Shell lines recording which code and arguments produced the results in directory o."""
+    return f"""printf 'git_commit\\trun_date\\thost\\tjob_id\\tgiraffe_args\\n%s\\t%s\\t%s\\t%s\\t%s\\n' \\
+    '{git_commit()}' "$(date -Iseconds)" "$(hostname)" "$SLURM_JOB_ID" '{c['giraffe_args']}' > {o}/run_info.tsv
 """
 
 
@@ -108,12 +178,16 @@ def index_script(c, reads):
     out = index_prefix(c)
     log = DATA_DIR / "logs" / f"index_{c['name']}.%j.log"
     return sbatch_header(f"idx-{c['name']}", c["index_mem"], INDEX_TIME, log) + f"""mkdir -p {out.parent}
+# Until the new .params is written, map/density treat this index as not built.
+rm -f {out}.params
 /usr/bin/time -v {c['vg_binary']} minimizer {c['index_args']} -p -t {THREADS} \\
     -d {DIST} -o {out}.min.tmp -z {out}.zipcodes.tmp {GBZ}
 mv {out}.min.tmp {out}.min
 mv {out}.zipcodes.tmp {out}.zipcodes
 echo "min size (bytes): $(stat -c %s {out}.min)"
 echo "zipcodes size (bytes): $(stat -c %s {out}.zipcodes)"
+cat > {out}.params <<'PARAMS'
+{index_params(c)}PARAMS
 """
 
 
@@ -138,7 +212,7 @@ mv $O/annot.gam.tmp $O/annot.gam
 mv $O/compare.tsv.tmp $O/compare.tsv
 {vg} stats -a $O/mapped.gam > $O/stats.txt.tmp
 mv $O/stats.txt.tmp $O/stats.txt
-cat $O/gamcompare.txt
+""" + run_info(c, o) + """cat $O/gamcompare.txt
 """
 
 
@@ -163,7 +237,7 @@ awk -F'\\t' -v name={c['name']} 'NR > 1 && $3 != "NA" {{
     END {{ OFS = "\\t"
         print "name", "reads", "total_bp", "minimizers", "seeds", "density_pooled", "density_mean_per_read", "kept_minimizer_hits_per_bp"
         print name, n, len, m, s, m / len, d / n, s / len }}' $O/per_read.tsv > $O/density_summary.tsv
-cat $O/density_summary.tsv
+""" + run_info(c, o) + """cat $O/density_summary.tsv
 """
 
 
@@ -221,13 +295,16 @@ column -t -s$'\\t' $OUT/minimizer_summary.tsv
 STAGES = {"index": index_script, "map": map_script, "density": density_script}
 
 RESULT_COLUMNS = [
-    "name", "label", "density_group", "reads_set",
+    "name", "label", "density_group", "reads_set", "index_args", "giraffe_args", "git_commit", "run_date",
     "total_reads", "aligned", "eligible", "correct", "wrong", "accuracy",
     "reads_per_sec_per_thread", "giraffe_mem_gb", "giraffe_wall_s",
     "index_min_gb", "index_zipcodes_gb", "index_build_min", "index_peak_gib",
     "occurrences", "density_graph", "density_reads", "density_reads_source",
     "kept_minimizers_per_read", "mean_hits_per_kept_minimizer",
 ]
+
+
+SNAPSHOT_FILES = ["results.tsv", "comparison.png", "filter_summary.tsv", "minimizer_summary.tsv"]
 
 
 def grep_first(path, pattern, cast=float):
@@ -269,6 +346,19 @@ def collect_row(c, reads_set, graph_length):
     if row["correct"] is not None and row["eligible"]:
         row["wrong"] = row["eligible"] - row["correct"]
         row["accuracy"] = row["correct"] / row["eligible"]
+    # Provenance of the map run. Runs from before run_info.tsv existed get commit NA and the
+    # gamcompare output's modification time as an approximate run date.
+    info = read_density_summary(o / "run_info.tsv")
+    params = Path(f"{index_prefix(c)}.params")
+    if params.is_file():
+        match = re.search(r"^index_args=(.*)$", params.read_text(), re.M)
+        row["index_args"] = match.group(1) if match else None
+    if info is not None:
+        row["git_commit"], row["run_date"], row["giraffe_args"] = info["git_commit"], info["run_date"], info["giraffe_args"]
+    elif (o / "gamcompare.txt").is_file():
+        row["giraffe_args"] = c["giraffe_args"]
+        mtime = (o / "gamcompare.txt").stat().st_mtime
+        row["run_date"] = datetime.fromtimestamp(mtime).astimezone().isoformat(timespec="seconds")
     row["total_reads"] = grep_first(o / "stats.txt", r"Total alignments: (\d+)", int)
     row["aligned"] = grep_first(o / "stats.txt", r"Total aligned: (\d+)", int)
     row["reads_per_sec_per_thread"] = grep_first(o / "giraffe.log", r"Mapping speed: ([\d.]+)")
@@ -334,7 +424,7 @@ def plot_comparison(rows, path, reads_set):
     colors = [reference_color if r["density_group"] == "reference" else test_color for r in rows]
     x = range(len(rows))
 
-    fig, (ax_err, ax_speed) = plt.subplots(1, 2, figsize=(10, 4.2))
+    fig, (ax_err, ax_speed, ax_hits) = plt.subplots(1, 3, figsize=(14, 4.4))
     error = [100 * r["wrong"] / r["eligible"] for r in rows]
     bounds = [wilson_interval(r["wrong"], r["eligible"]) for r in rows]
     yerr = [[e - 100 * lo for e, (lo, hi) in zip(error, bounds)],
@@ -356,7 +446,15 @@ def plot_comparison(rows, path, reads_set):
     ax_speed.set_title("Mapping speed (reads / s / thread)", fontsize=11, color=ink, loc="left")
     ax_speed.set_ylim(0, 1.15 * max(speed))
 
-    for ax in (ax_err, ax_speed):
+    hits = [r.get("mean_hits_per_kept_minimizer") or 0 for r in rows]
+    ax_hits.bar(x, hits, color=colors, width=0.6)
+    for i, h in zip(x, hits):
+        ax_hits.annotate(f"{h:.2f}", (i, h), xytext=(0, 4), textcoords="offset points",
+                         ha="center", fontsize=9, color=ink)
+    ax_hits.set_title("Graph hits per kept minimizer (mean)", fontsize=11, color=ink, loc="left")
+    ax_hits.set_ylim(0, 1.15 * max(hits) if max(hits) > 0 else 1)
+
+    for ax in (ax_err, ax_speed, ax_hits):
         ax.set_xticks(list(x))
         ax.set_xticklabels(names, rotation=20, ha="right", fontsize=9, color=ink)
         ax.set_facecolor("#fcfcfb")
@@ -374,7 +472,7 @@ def plot_comparison(rows, path, reads_set):
     plt.close(fig)
 
 
-def collect(conditions, reads):
+def collect(conditions, reads, snapshot=False):
     reads_set = Path(reads).stem
     graph_length = grep_first(DATA_DIR / "graph.length.txt", r"length\s+(\d+)", int)
     rows, skipped = [], []
@@ -396,6 +494,13 @@ def collect(conditions, reads):
         plot = out_dir / "comparison.png"
         plot_comparison(rows, plot, reads_set)
         print(f"wrote {plot}")
+    if snapshot:
+        dest = REPO_DIR / "results_summary" / reads_set
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in SNAPSHOT_FILES:
+            if (out_dir / name).is_file():
+                shutil.copy2(out_dir / name, dest / name)
+                print(f"snapshot {dest / name}")
 
 
 def main():
@@ -407,6 +512,9 @@ def main():
                         help="truth GAM for map/density (default: 1k HG002 HiFi)")
     parser.add_argument("--only", nargs="*", help="run only these condition names")
     parser.add_argument("--submit", action="store_true", help="sbatch the generated scripts")
+    parser.add_argument("--force", action="store_true", help="index: rebuild even if already built")
+    parser.add_argument("--snapshot", action="store_true",
+                        help="collect: also copy the summaries to results_summary/<reads>/ in this repo")
     args = parser.parse_args()
 
     conditions = load_conditions(args.conditions)
@@ -417,7 +525,7 @@ def main():
         conditions = [c for c in conditions if c["name"] in args.only]
 
     if args.stage == "collect":
-        collect(conditions, args.reads)
+        collect(conditions, args.reads, args.snapshot)
         return
     if args.stage == "filters":
         (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
@@ -435,6 +543,8 @@ def main():
 
     tag = "" if args.stage == "index" else f"_{Path(args.reads).stem}"
     for c in conditions:
+        if not check_index_params(c, args.stage, args.force):
+            continue
         script = jobs_dir / f"{args.stage}{tag}_{c['name']}.sbatch"
         script.write_text(STAGES[args.stage](c, args.reads))
         print(f"[{c['name']}] {args.stage} -> {script}")
