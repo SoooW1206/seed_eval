@@ -2,3 +2,4 @@ name	vg_binary	index_args	index_mem	density_group	label	giraffe_args
 mini_k31w20	/private/home/twang285/bin/vg_baseline	-k 31 -w 20	80G	2/21	minimizer	
 sync_k31s11	/private/home/twang285/bin/vg_baseline	-c -k 31 -s 11	80G	2/21	closed syncmer	
 miniW_k31w20	/private/home/twang285/bin/vg_baseline	-W -k 31 -w 20	256G	2/21	weighted minimizer	
+default_k31w50W	/private/home/twang285/bin/vg_baseline	-W -k 31 -w 50	256G	reference	weighted minimizer (lab long-read default)	
