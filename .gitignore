@@ -9,3 +9,4 @@ handoff/
 *.fastq
 *.gz
 __pycache__/
+.claude/
