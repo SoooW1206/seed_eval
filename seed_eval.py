@@ -41,6 +41,7 @@ import functools
 import math
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 from datetime import datetime
@@ -311,7 +312,8 @@ STAGES = {"index": index_script, "map": map_script, "density": density_script}
 RESULT_COLUMNS = [
     "name", "label", "density_group", "reads_set", "index_args", "giraffe_args", "git_commit", "run_date",
     "total_reads", "aligned", "eligible", "correct", "wrong", "accuracy",
-    "reads_per_sec_per_thread", "giraffe_mem_gb", "giraffe_wall_s",
+    "reads_per_sec_per_thread", "speed_min", "speed_max", "reps", "reps_consistent",
+    "giraffe_mem_gb", "giraffe_wall_s",
     "index_min_gb", "index_zipcodes_gb", "index_build_min", "index_peak_gib",
     "occurrences", "density_graph", "density_reads", "density_reads_source",
     "kept_minimizers_per_read", "mean_hits_per_kept_minimizer",
@@ -353,6 +355,14 @@ def read_density_summary(path):
 
 def collect_row(c, reads_set, graph_length):
     o = DATA_DIR / "results" / reads_set / c["name"]
+    # Replicated runs (map --reps) live in rep1..N: accuracy, memory and provenance come from
+    # rep1, speed is the median over replicates.
+    runs = sorted((p for p in o.glob("rep*") if p.is_dir() and re.fullmatch(r"rep\d+", p.name)
+                   and (p / "gamcompare.txt").is_file()), key=lambda p: int(p.name[3:]))
+    if runs:
+        o = runs[0]
+    else:
+        runs = [o]
     row = {"name": c["name"], "label": c["label"], "density_group": c["density_group"], "reads_set": reads_set}
 
     row["correct"] = grep_first(o / "gamcompare.txt", r"(\d+) reads correct", int)
@@ -375,7 +385,14 @@ def collect_row(c, reads_set, graph_length):
         row["run_date"] = datetime.fromtimestamp(mtime).astimezone().isoformat(timespec="seconds")
     row["total_reads"] = grep_first(o / "stats.txt", r"Total alignments: (\d+)", int)
     row["aligned"] = grep_first(o / "stats.txt", r"Total aligned: (\d+)", int)
-    row["reads_per_sec_per_thread"] = grep_first(o / "giraffe.log", r"Mapping speed: ([\d.]+)")
+    speeds = [s for s in (grep_first(r / "giraffe.log", r"Mapping speed: ([\d.]+)") for r in runs) if s is not None]
+    if speeds:
+        row["reads_per_sec_per_thread"] = statistics.median(speeds)
+        row["speed_min"], row["speed_max"] = min(speeds), max(speeds)
+    row["reps"] = len(speeds)
+    # Giraffe should be deterministic, so every replicate must get the same number of reads right.
+    corrects = {grep_first(r / "gamcompare.txt", r"(\d+) reads correct", int) for r in runs}
+    row["reps_consistent"] = "yes" if len(corrects) == 1 else "no"
     row["giraffe_mem_gb"] = grep_first(o / "giraffe.log", r"Memory footprint: ([\d.]+) GB")
     row["giraffe_wall_s"] = grep_first(o / "giraffe.time", r"Elapsed \(wall clock\) time \(h:mm:ss or m:ss\): ([\d:.]+)",
                                        wall_seconds)
@@ -457,7 +474,7 @@ def plot_comparison(rows, path, reads_set):
     for i, s in zip(x, speed):
         ax_speed.annotate(f"{s:.1f}", (i, s), xytext=(0, 4), textcoords="offset points",
                           ha="center", fontsize=9, color=ink)
-    ax_speed.set_title("Mapping speed (reads / s / thread)", fontsize=11, color=ink, loc="left")
+    ax_speed.set_title("Mapping speed (reads / s / thread, median of reps)", fontsize=11, color=ink, loc="left")
     ax_speed.set_ylim(0, 1.15 * max(speed))
 
     hits = [r.get("mean_hits_per_kept_minimizer") or 0 for r in rows]
@@ -504,6 +521,9 @@ def collect(conditions, reads, snapshot=False):
     print(f"wrote {table} ({len(rows)} conditions)")
     if skipped:
         print(f"skipped (no map results for {reads_set}): {[r['name'] for r in skipped]}")
+    inconsistent = [r["name"] for r in rows if r.get("reps_consistent") == "no"]
+    if inconsistent:
+        print(f"WARNING: replicates disagree on the number of correct reads: {inconsistent}")
     if rows:
         plot = out_dir / "comparison.png"
         plot_comparison(rows, plot, reads_set)
