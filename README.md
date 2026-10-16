@@ -113,7 +113,7 @@ scripts to `DATA_DIR/jobs/` and prints them; add `--submit` to submit.
 | map | `python3 seed_eval.py map --reads GAM [--reps N] --submit` | `results/<reads>/<name>/`: `mapped.gam`, `annot.gam`, `compare.tsv`, `gamcompare.txt`, `giraffe.log`, `stats.txt`, `*.time`, `report.tsv`, `run_info.tsv` |
 | density | `python3 seed_eval.py density --reads GAM --submit` | `results/<reads>/<name>/density/`: `prov.gam`, `per_read.tsv`, `density_summary.tsv` |
 | filters | `python3 seed_eval.py filters --reads GAM --submit` | one job for all conditions: `results/<reads>/filter_summary.tsv`, `minimizer_summary.tsv` (+ per-condition copies in `density/`) |
-| collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `comparison.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
+| collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
 
 What each job runs:
 
@@ -160,11 +160,20 @@ Typical order: index → for each read set: map and density → filters → coll
 ### Plots
 
 `comparison.png` has one bar per condition: mismapped reads as % of eligible with a
-95% Wilson interval (labelled `wrong/eligible`), mapping speed, and seeds per read on
-the same read set (solid bar: median, light bar: mean). Blue bars are tested
-conditions, gray is the `reference` group. Seed columns are only filled from a density
-run on the same read set; without one they are `NA`, and if no condition has one the
-seeds panel is left out.
+95% Wilson interval, mapping speed, and seeds per read on the same read set (solid
+bar: median, light bar: mean). Conditions are grouped by method (`label`), densest
+first within a method, with the `reference` group last; each method has its own
+color and the reference is gray. With more than 6 conditions the bars carry no value
+labels. If the read set has no replicates, the speed panel is titled "single run, not
+for comparison". Seed columns are only filled from a density run on the same read
+set; without one they are `NA`, and if no condition has one the seeds panel is left out.
+
+`density_sweep.png` is drawn only when the read set has results at two or more
+density groups. Its x axis is the measured density on reads (`density_reads`); the
+three panels show mismapped reads (% of eligible, 95% Wilson interval), seeds per read
+(mean solid, median dashed) and giraffe memory. Each method is one line and reference
+conditions are gray points. In the error panel the methods are shifted slightly apart
+along x so their intervals do not overlap; the shift is for display only.
 
 ### Filter summaries
 

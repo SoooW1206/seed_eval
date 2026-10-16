@@ -327,7 +327,7 @@ RESULT_COLUMNS = [
 ]
 
 
-SNAPSHOT_FILES = ["results.tsv", "comparison.png", "filter_summary.tsv", "minimizer_summary.tsv"]
+SNAPSHOT_FILES = ["results.tsv", "comparison.png", "density_sweep.png", "filter_summary.tsv", "minimizer_summary.tsv"]
 
 
 def grep_first(path, pattern, cast=float):
@@ -457,21 +457,69 @@ def wilson_interval(successes, n, z=1.96):
     return centre - half, centre + half
 
 
+METHOD_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]  # categorical slots 1-3 of the reference palette
+REFERENCE_COLOR = "#8a8984"
+REFERENCE_GROUP = "reference"
+MAX_LABELLED_CONDITIONS = 6  # above this, bars carry no value labels
+
+
+def method_colors(rows):
+    """One color per method (label) in order of first appearance; the reference group is gray."""
+    labels = list(dict.fromkeys(r["label"] for r in rows if r["density_group"] != REFERENCE_GROUP))
+    if len(labels) > len(METHOD_COLORS):
+        sys.exit(f"plots support at most {len(METHOD_COLORS)} methods, got {labels}")
+    return dict(zip(labels, METHOD_COLORS))
+
+
+def row_color(r, colors):
+    return REFERENCE_COLOR if r["density_group"] == REFERENCE_GROUP else colors[r["label"]]
+
+
+def nominal_density(r):
+    """Measured density on reads if known, else the density group read as a fraction (e.g. 2/21)."""
+    if r.get("density_reads") is not None:
+        return r["density_reads"]
+    match = re.fullmatch(r"(\d+)/(\d+)", r["density_group"])
+    return int(match.group(1)) / int(match.group(2)) if match else 0.0
+
+
+def style_axes(ax):
+    ax.set_facecolor("#fcfcfb")
+    ax.grid(color="#e6e5e0", linewidth=0.8)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color("#c3c2b7")
+    ax.tick_params(colors="#52514e")
+
+
+def plot_order(rows, colors):
+    """Grouped by method, densest first within a method, reference conditions last."""
+    method_rank = {label: i for i, label in enumerate(colors)}
+    return sorted(rows, key=lambda r: (r["density_group"] == REFERENCE_GROUP,
+                                       method_rank.get(r["label"], len(method_rank)), -nominal_density(r)))
+
+
 def plot_comparison(rows, path, reads_set):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
 
-    test_color, reference_color = "#2a78d6", "#8a8984"
     ink, muted = "#0b0b0b", "#52514e"
     rows = [r for r in rows if r.get("accuracy") is not None]
+    method_color = method_colors(rows)
+    rows = plot_order(rows, method_color)
     names = [r["name"] for r in rows]
-    colors = [reference_color if r["density_group"] == "reference" else test_color for r in rows]
+    colors = [row_color(r, method_color) for r in rows]
     x = range(len(rows))
+    labelled = len(rows) <= MAX_LABELLED_CONDITIONS
 
     # The seeds panel needs this read set's density runs; leave it out if none exist.
     has_seeds = any(r.get("seeds_per_read_median") is not None for r in rows)
-    fig, axes = plt.subplots(1, 3 if has_seeds else 2, figsize=(14 if has_seeds else 10, 4.4))
+    panels = 3 if has_seeds else 2
+    fig, axes = plt.subplots(1, panels, figsize=(panels * max(5, 0.55 * len(rows) + 1.5), 5.2))
     ax_err, ax_speed = axes[0], axes[1]
     error = [100 * r["wrong"] / r["eligible"] for r in rows]
     bounds = [wilson_interval(r["wrong"], r["eligible"]) for r in rows]
@@ -480,8 +528,9 @@ def plot_comparison(rows, path, reads_set):
     ax_err.bar(x, error, color=colors, width=0.6)
     ax_err.errorbar(x, error, yerr=yerr, fmt="none", ecolor=muted, elinewidth=1.5, capsize=4)
     for i, r in zip(x, rows):
-        ax_err.annotate(f"{r['wrong']}/{r['eligible']}", (i, 100 * bounds[i][1]), xytext=(0, 4),
-                        textcoords="offset points", ha="center", fontsize=9, color=ink)
+        if labelled:
+            ax_err.annotate(f"{r['wrong']}/{r['eligible']}", (i, 100 * bounds[i][1]), xytext=(0, 4),
+                            textcoords="offset points", ha="center", fontsize=9, color=ink)
     ax_err.set_title("Mismapped reads (% of eligible, 95% CI)", fontsize=11, color=ink, loc="left")
     # Leave room above the tallest CI whisker for its count label.
     ax_err.set_ylim(0, 1.2 * max(100 * hi for lo, hi in bounds))
@@ -489,9 +538,13 @@ def plot_comparison(rows, path, reads_set):
     speed = [r["reads_per_sec_per_thread"] or 0 for r in rows]
     ax_speed.bar(x, speed, color=colors, width=0.6)
     for i, s in zip(x, speed):
-        ax_speed.annotate(f"{s:.1f}", (i, s), xytext=(0, 4), textcoords="offset points",
-                          ha="center", fontsize=9, color=ink)
-    ax_speed.set_title("Mapping speed (reads / s / thread, median of reps)", fontsize=11, color=ink, loc="left")
+        if labelled:
+            ax_speed.annotate(f"{s:.1f}", (i, s), xytext=(0, 4), textcoords="offset points",
+                              ha="center", fontsize=9, color=ink)
+    speed_title = "Mapping speed (reads / s / thread, median of reps)"
+    if max(r.get("reps") or 0 for r in rows) <= 1:
+        speed_title = "Mapping speed (reads / s / thread)\n(single run, not for comparison)"
+    ax_speed.set_title(speed_title, fontsize=11, color=ink, loc="left")
     ax_speed.set_ylim(0, 1.15 * max(speed))
 
     if has_seeds:
@@ -505,8 +558,9 @@ def plot_comparison(rows, path, reads_set):
                     continue
                 ax_seeds.bar(i + offset, value, width=width, color=colors[i], alpha=alpha,
                              edgecolor="#fcfcfb", linewidth=2)
-                ax_seeds.annotate(f"{value:.0f}", (i + offset, value), xytext=(0, 3), textcoords="offset points",
-                                  ha="center", fontsize=7, color=ink)
+                if labelled:
+                    ax_seeds.annotate(f"{value:.0f}", (i + offset, value), xytext=(0, 3), textcoords="offset points",
+                                      ha="center", fontsize=7, color=ink)
         top = max(r.get("seeds_per_read_mean") or 0 for r in rows)
         ax_seeds.set_ylim(0, 1.15 * top if top > 0 else 1)
         ax_seeds.set_title(f"Seeds per read on {reads_set}\n(solid: median, light: mean)",
@@ -514,20 +568,70 @@ def plot_comparison(rows, path, reads_set):
 
     for ax in axes:
         ax.set_xticks(list(x))
-        ax.set_xticklabels(names, rotation=20, ha="right", fontsize=9, color=ink)
-        ax.set_facecolor("#fcfcfb")
-        ax.grid(axis="y", color="#e6e5e0", linewidth=0.8)
-        ax.set_axisbelow(True)
-        for side in ("top", "right"):
-            ax.spines[side].set_visible(False)
-        for side in ("left", "bottom"):
-            ax.spines[side].set_color("#c3c2b7")
-        ax.tick_params(colors=muted)
-    fig.suptitle(f"{reads_set}  (blue: tested conditions, gray: lab default reference)",
-                 fontsize=10, color=muted, x=0.01, ha="left")
-    fig.tight_layout()
+        ax.set_xticklabels(names, rotation=45, ha="right", rotation_mode="anchor", fontsize=9, color=ink)
+        style_axes(ax)
+        ax.grid(axis="x", visible=False)
+    legend = [Patch(color=color, label=label) for label, color in method_color.items()]
+    legend += [Patch(color=REFERENCE_COLOR, label=r["label"]) for r in rows if r["density_group"] == REFERENCE_GROUP]
+    fig.legend(handles=legend, loc="upper right", ncol=len(legend), frameon=False, fontsize=9, labelcolor=ink)
+    fig.suptitle(reads_set, fontsize=10, color=muted, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     fig.savefig(path, dpi=150, facecolor="#fcfcfb")
     plt.close(fig)
+
+
+def plot_density_sweep(rows, path, reads_set):
+    """Measured seed density on reads vs error rate, seeds per read and giraffe memory; one line per
+    method, reference conditions as gray points. Returns False (no plot) with fewer than two density groups."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ink, muted = "#0b0b0b", "#52514e"
+    rows = [r for r in rows if r.get("accuracy") is not None and r.get("density_reads") is not None]
+    groups = {r["density_group"] for r in rows if r["density_group"] != REFERENCE_GROUP}
+    if len(groups) < 2:
+        return False
+    method_color = method_colors(rows)
+    series = [(label, color, sorted((r for r in rows if r["label"] == label and r["density_group"] != REFERENCE_GROUP),
+                                    key=lambda r: r["density_reads"]))
+              for label, color in method_color.items()]
+    series += [(r["label"], REFERENCE_COLOR, [r]) for r in rows if r["density_group"] == REFERENCE_GROUP]
+    point = dict(marker="o", ms=7, markeredgecolor="#fcfcfb", markeredgewidth=1.5)
+
+    fig, (ax_err, ax_seeds, ax_mem) = plt.subplots(1, 3, figsize=(16, 5.2))
+    for index, (label, color, members) in enumerate(series):
+        # Methods sit at nearly the same density, so nudge their error bars apart (display only).
+        dodge = (index - (len(method_color) - 1) / 2) * 0.0025 if index < len(method_color) else 0.0
+        xs = [r["density_reads"] + dodge for r in members]
+        error = [100 * r["wrong"] / r["eligible"] for r in members]
+        bounds = [wilson_interval(r["wrong"], r["eligible"]) for r in members]
+        ax_err.errorbar(xs, error, yerr=[[e - 100 * lo for e, (lo, hi) in zip(error, bounds)],
+                                         [100 * hi - e for e, (lo, hi) in zip(error, bounds)]],
+                        color=color, ecolor=color, lw=2, elinewidth=1.2, capsize=3, label=label, **point)
+        seeds = [m for m in members if m.get("seeds_per_read_mean") is not None]
+        ax_seeds.plot([m["density_reads"] for m in seeds], [m["seeds_per_read_mean"] for m in seeds],
+                      color=color, lw=2, **point)
+        ax_seeds.plot([m["density_reads"] for m in seeds], [m["seeds_per_read_median"] for m in seeds],
+                      color=color, lw=1.5, ls="--", **point)
+        mem = [m for m in members if m.get("giraffe_mem_gb") is not None]
+        ax_mem.plot([m["density_reads"] for m in mem], [m["giraffe_mem_gb"] for m in mem], color=color, lw=2, **point)
+
+    titles = ["Mismapped reads (% of eligible, 95% CI)",
+              f"Seeds per read on {reads_set}\n(solid: mean, dashed: median)",
+              "Giraffe memory (GB)"]
+    for ax, title in zip((ax_err, ax_seeds, ax_mem), titles):
+        ax.set_title(title, fontsize=11, color=ink, loc="left")
+        ax.set_xlabel("Measured seed density on reads (seeds / bp)", color=muted)
+        ax.set_ylim(bottom=0)
+        style_axes(ax)
+    handles, labels = ax_err.get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper right", ncol=len(labels), frameon=False, fontsize=9, labelcolor=ink)
+    fig.suptitle(reads_set, fontsize=10, color=muted, x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(path, dpi=150, facecolor="#fcfcfb")
+    plt.close(fig)
+    return True
 
 
 def collect(conditions, reads, snapshot=False):
@@ -559,6 +663,12 @@ def collect(conditions, reads, snapshot=False):
         plot = out_dir / "comparison.png"
         plot_comparison(rows, plot, reads_set)
         print(f"wrote {plot}")
+        sweep = out_dir / "density_sweep.png"
+        if plot_density_sweep(rows, sweep, reads_set):
+            print(f"wrote {sweep}")
+        else:
+            sweep.unlink(missing_ok=True)  # never snapshot a stale sweep from an earlier run
+            print(f"density_sweep.png not drawn for {reads_set}: needs results at two or more density groups")
     if snapshot:
         dest = REPO_DIR / "results_summary" / reads_set
         dest.mkdir(parents=True, exist_ok=True)
