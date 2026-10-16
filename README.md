@@ -33,10 +33,41 @@ Current setup (Paten lab rotation, Oct 2026):
   with 16 threads; the `filters` job uses `short`.
 - Python 3.8+ with matplotlib (only `collect` plots); `jq` on the compute nodes
   (`density` and `filters` check for it).
-- The graph `.gbz` and its distance index `.dist` in the data directory (see below).
+- A graph `.gbz`; its distance index is built next to it as `<graph>.dist` by `prepare`.
+- Truth reads as GAM files with positions on a `REFERENCE` path of the graph.
 
-Paths are set at the top of `seed_eval.py`: `DATA_DIR` (large files),
-`GRAPH_NAME`, `READS_DIR`, `DEFAULT_READS` (1k set), plus `PARTITION`, `THREADS`,
+## Quick start
+
+1. Copy the example config and fill in your paths (tab-separated `key`, `value`):
+
+   ```bash
+   cp config.example.tsv config.tsv
+   ```
+
+   | Key | Meaning |
+   |---|---|
+   | `data_dir` | directory for large outputs (indexes, results, jobs, logs) |
+   | `graph` | the graph `.gbz`; the distance index is `<graph>.dist` next to it |
+   | `reads_dir` | directory with the truth GAMs; the default read set is `reads_dir/HG002-sim-hifi-1k.gam` |
+   | `vg` | vg executable used by rows whose `vg_binary` is `default`, and by `prepare` |
+
+   `config.tsv` is ignored by git. Another file can be passed with `--config FILE`.
+
+2. Edit `conditions.tsv` (one row per seed configuration, see below).
+
+3. Run the stages in order. Each prints the sbatch scripts it writes; add `--submit`
+   to submit, and wait for the jobs to finish before the next step.
+
+   ```bash
+   python3 seed_eval.py prepare --submit                    # once per graph
+   python3 seed_eval.py index --submit                      # once per condition
+   python3 seed_eval.py map --reads READS.gam --submit      # for each read set
+   python3 seed_eval.py density --reads READS.gam --submit  # for each read set
+   python3 seed_eval.py filters --reads READS.gam --submit  # for each read set
+   python3 seed_eval.py collect --reads READS.gam --snapshot
+   ```
+
+Other settings stay at the top of `seed_eval.py`: `PARTITION`, `THREADS`,
 `GIRAFFE_PRESET`, `COMPARE_RANGE`, `MAP_MEM` and the time limits.
 
 ## Layout
@@ -45,11 +76,11 @@ Paths are set at the top of `seed_eval.py`: `DATA_DIR` (large files),
 seed-eval/                      this repo (code + small summaries)
   seed_eval.py                  the driver
   conditions.tsv                one row per condition
-  scripts/                      one-off preparation jobs for a graph
+  config.example.tsv            template for config.tsv (your paths; not in git)
   results_summary/<reads>/      committed snapshots of the summary tables and plots
 
-DATA_DIR/                       large files, not in git
-  <graph>.gbz, <graph>.dist     graph and distance index
+data_dir/                       large files, not in git
+  graph.paths_meta.tsv, graph.length.txt   outputs of prepare
   indexes/<name>.min|.zipcodes|.params
   results/<reads>/<name>/       per-condition map outputs, logs, density/ subdirectory
   results/<reads>/              results.tsv, comparison.png, filter/minimizer summaries
@@ -57,16 +88,16 @@ DATA_DIR/                       large files, not in git
   logs/                         Slurm logs
 ```
 
-## One-time preparation per graph (`scripts/`)
+## One-time preparation per graph (`prepare`)
 
-These do not depend on the reads. Run each once for a new graph (they hard-code the
-graph path, so edit them first).
+`python3 seed_eval.py prepare [--submit]` writes three jobs to `data_dir/jobs/`. They
+do not depend on the reads; run them once for a new graph.
 
-| Script | What it does | Used by |
+| Job | What it does | Used by |
 |---|---|---|
-| `check_paths.sbatch` | `vg paths -M`; confirms the truth's reference (CHM13) is a `REFERENCE` path | sanity check for `gamcompare` |
-| `build_dist.sbatch` | `vg index -j` distance index (~97 GiB peak, 44 min on this graph) | every index/map job |
-| `graph_length.sbatch` | `vg stats -l` total sequence length | denominator of `density_graph` |
+| `prepare_check_paths` | `vg paths -M` into `graph.paths_meta.tsv`; confirms the truth's reference (CHM13 here) is a `REFERENCE` path | sanity check for `gamcompare` |
+| `prepare_build_dist` | `vg index -j` distance index `<graph>.dist` (~97 GiB peak, 44 min on this graph) | every index/map job |
+| `prepare_graph_length` | `vg stats -l` total sequence length into `graph.length.txt` | denominator of `density_graph` |
 
 ## conditions.tsv
 
@@ -75,7 +106,7 @@ Tab-separated, one row per condition. All columns must be present; optional ones
 | Column | Required | Meaning |
 |---|---|---|
 | `name` | yes | unique name; used for index and result file names |
-| `vg_binary` | yes | absolute path of the vg used for every step of this condition |
+| `vg_binary` | yes | absolute path of the vg used for every step of this condition, or `default` for the `vg` in the config |
 | `index_args` | yes | arguments passed verbatim to `vg minimizer` (e.g. `-k 31 -w 20`, `-c -k 31 -s 11`, `-W -k 31 -w 20`) |
 | `index_mem` | yes | `--mem` of the index job |
 | `giraffe_args` | no | extra arguments passed verbatim to `vg giraffe` (empty in the current sweep) |
@@ -103,7 +134,7 @@ becomes `k - 1`. Nothing requires `w >= k`; the vg default is k29 w11.
 ## Stages
 
 Run from the repo directory. Every stage except `collect` only **writes** sbatch
-scripts to `DATA_DIR/jobs/` and prints them; add `--submit` to submit.
+scripts to `data_dir/jobs/` and prints them; add `--submit` to submit.
 `--only NAME ...` restricts to some conditions, `--conditions FILE` uses another table,
 `--reads GAM` picks the truth read set (default: 1k).
 
@@ -151,7 +182,7 @@ Typical order: index → for each read set: map and density → filters → coll
 | `giraffe_wall_s` | wall time of the giraffe command, mostly index loading for small read sets |
 | `index_min_gb`, `index_zipcodes_gb`, `index_build_min`, `index_peak_gib` | index sizes, build time and peak memory |
 | `occurrences` | `Minimizer occurrences` reported by `vg minimizer` |
-| `density_graph` | `occurrences / graph length` (graph length from `graph_length.sbatch`) |
+| `density_graph` | `occurrences / graph length` (graph length from `prepare_graph_length`) |
 | `density_reads` | **main density measure**: seeds picked per bp of read (`stage.minimizer.results / length`) |
 | `seeds_per_read_median`, `seeds_per_read_mean`, `seeds_per_read_p90` | seeds per read (`stage.seed.results`, graph hits of the kept minimizers): median, mean and nearest-rank 90th percentile |
 | `kept_minimizers_per_read` | minimizers left after giraffe's filters, per read |
@@ -207,6 +238,7 @@ Use replicates (`--reps`) on a large read set and treat small differences with c
   through `giraffe_args`.
 - Small read sets give few errors; use 100k+ reads to compare accuracy.
 - Indexes are large (~24 GB `.min` at density 2/21, ~12 GB at w50).
-- Changing the graph means re-running `scripts/`, rebuilding every index and editing
-  `GRAPH_NAME` in `seed_eval.py`; changing only the reads needs `map`/`collect` with
+- Changing the graph means pointing `graph` in the config at it, re-running `prepare`
+  and rebuilding every index (the `.params` check refuses indexes built on another
+  graph path); changing only the reads needs `map`/`density`/`filters`/`collect` with
   `--reads`.

@@ -1,14 +1,14 @@
 name	vg_binary	index_args	index_mem	density_group	label	giraffe_args	map_mem
-mini_k31w20	/private/home/twang285/bin/vg_baseline	-k 31 -w 20	80G	2/21	minimizer		
-sync_k31s11	/private/home/twang285/bin/vg_baseline	-c -k 31 -s 11	80G	2/21	closed syncmer		
-miniW_k31w20	/private/home/twang285/bin/vg_baseline	-W -k 31 -w 20	256G	2/21	weighted minimizer		
-default_k31w50W	/private/home/twang285/bin/vg_baseline	-W -k 31 -w 50	256G	reference	weighted minimizer (lab long-read default)		
-mini_k31w10	/private/home/twang285/bin/vg_baseline	-k 31 -w 10	128G	2/11	minimizer		96G
-mini_k31w16	/private/home/twang285/bin/vg_baseline	-k 31 -w 16	80G	2/17	minimizer		
-mini_k31w24	/private/home/twang285/bin/vg_baseline	-k 31 -w 24	80G	2/25	minimizer		
-sync_k31s21	/private/home/twang285/bin/vg_baseline	-c -k 31 -s 21	128G	2/11	closed syncmer		96G
-sync_k31s15	/private/home/twang285/bin/vg_baseline	-c -k 31 -s 15	80G	2/17	closed syncmer		
-sync_k31s7	/private/home/twang285/bin/vg_baseline	-c -k 31 -s 7	80G	2/25	closed syncmer		
-miniW_k31w10	/private/home/twang285/bin/vg_baseline	-W -k 31 -w 10	256G	2/11	weighted minimizer		96G
-miniW_k31w16	/private/home/twang285/bin/vg_baseline	-W -k 31 -w 16	256G	2/17	weighted minimizer		
-miniW_k31w24	/private/home/twang285/bin/vg_baseline	-W -k 31 -w 24	256G	2/25	weighted minimizer		
+mini_k31w20	default	-k 31 -w 20	80G	2/21	minimizer		
+sync_k31s11	default	-c -k 31 -s 11	80G	2/21	closed syncmer		
+miniW_k31w20	default	-W -k 31 -w 20	256G	2/21	weighted minimizer		
+default_k31w50W	default	-W -k 31 -w 50	256G	reference	weighted minimizer (lab long-read default)		
+mini_k31w10	default	-k 31 -w 10	128G	2/11	minimizer		96G
+mini_k31w16	default	-k 31 -w 16	80G	2/17	minimizer		
+mini_k31w24	default	-k 31 -w 24	80G	2/25	minimizer		
+sync_k31s21	default	-c -k 31 -s 21	128G	2/11	closed syncmer		96G
+sync_k31s15	default	-c -k 31 -s 15	80G	2/17	closed syncmer		
+sync_k31s7	default	-c -k 31 -s 7	80G	2/25	closed syncmer		
+miniW_k31w10	default	-W -k 31 -w 10	256G	2/11	weighted minimizer		96G
+miniW_k31w16	default	-W -k 31 -w 16	256G	2/17	weighted minimizer		
+miniW_k31w24	default	-W -k 31 -w 24	256G	2/25	weighted minimizer		

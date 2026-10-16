@@ -10,7 +10,8 @@ from its row in the table, so adding a condition means adding a row.
 
 Columns:
   name           unique condition name; used for output file names
-  vg_binary      absolute path to the vg executable used for every step
+  vg_binary      absolute path to the vg executable used for every step, or
+                 `default` for the vg in the config file
   index_args     arguments passed verbatim to `vg minimizer`
   index_mem      sbatch --mem for the index job (e.g. 80G). Measured at k=31 on
                  the HG002 sampled graph: plain ~56 GiB -> 80G, -W ~150 GiB -> 256G
@@ -19,7 +20,13 @@ Columns:
   density_group  only used for result tables and plots
   label          only used for result tables and plots
 
+Paths (data directory, graph, reads directory, default vg) are read from a
+tab-separated config file (--config, default config.tsv next to this script;
+see config.example.tsv).
+
 Stages:
+  prepare  one-time jobs per graph: check reference paths, build the distance
+           index (<graph>.dist next to the .gbz), total graph length
   index    vg minimizer -> indexes/<name>.min + .zipcodes
   map      giraffe -> annotate -> gamcompare -> stats, on --reads; --reps N runs it
            N times into <name>/rep1..N (for timing), keeping the GAMs of rep1 only
@@ -48,12 +55,11 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path("/private/groups/patenlab/twang285/seed-eval")
-GRAPH_NAME = "hprc-v2.0-mc-chm13-eval-sampled16o_fragmentlinked-for-real-hifi-HG002-full"
-GBZ = DATA_DIR / f"{GRAPH_NAME}.gbz"
-DIST = DATA_DIR / f"{GRAPH_NAME}.dist"
-READS_DIR = Path("/private/groups/patenlab/anovak/projects/hprc/lr-giraffe/reads/sim/hifi/HG002")
-DEFAULT_READS = READS_DIR / "HG002-sim-hifi-1k.gam"
+DEFAULT_CONFIG = REPO_DIR / "config.tsv"
+CONFIG_KEYS = ["data_dir", "graph", "reads_dir", "vg"]
+DEFAULT_READS_NAME = "HG002-sim-hifi-1k.gam"  # default truth GAM, inside reads_dir
+# Paths come from the config file; load_config() sets them before anything else runs.
+DATA_DIR = GBZ = DIST = READS_DIR = DEFAULT_READS = VG = None
 PARTITION = "medium"
 THREADS = 16  # vg minimizer: more than 16 threads rarely helps
 GIRAFFE_PRESET = "hifi"
@@ -66,6 +72,30 @@ REQUIRED_COLUMNS = ["name", "vg_binary", "index_args", "index_mem"]
 OPTIONAL_COLUMNS = ["giraffe_args", "map_mem", "density_group", "label"]
 
 
+def load_config(path):
+    """Read key/value paths (tab-separated) and set DATA_DIR, GBZ, DIST, READS_DIR, DEFAULT_READS and VG.
+    The distance index is expected next to the graph, with .dist in place of .gbz."""
+    global DATA_DIR, GBZ, DIST, READS_DIR, DEFAULT_READS, VG
+    if not Path(path).is_file():
+        sys.exit(f"{path}: config file not found; copy config.example.tsv to config.tsv and fill in your paths")
+    config = {}
+    with open(path, newline="") as f:
+        for row in csv.reader(f, delimiter="\t"):
+            if row and row[0].strip() and not row[0].startswith("#") and row[0].strip() != "key":
+                config[row[0].strip()] = row[1].strip() if len(row) > 1 else ""
+    missing = [key for key in CONFIG_KEYS if not config.get(key)]
+    if missing:
+        sys.exit(f"{path}: missing or empty keys {missing}")
+    GBZ = Path(config["graph"])
+    if GBZ.suffix != ".gbz":
+        sys.exit(f"{path}: graph must be a .gbz file, got {GBZ}")
+    DATA_DIR = Path(config["data_dir"])
+    DIST = GBZ.with_suffix(".dist")
+    READS_DIR = Path(config["reads_dir"])
+    DEFAULT_READS = READS_DIR / DEFAULT_READS_NAME
+    VG = config["vg"]
+
+
 def load_conditions(path):
     with open(path, newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
@@ -74,6 +104,9 @@ def load_conditions(path):
             sys.exit(f"{path}: missing columns {sorted(missing)}")
         conditions = [{k: (v or "").strip() for k, v in row.items()} for row in reader]
     validate(conditions, path)
+    for c in conditions:
+        if c["vg_binary"] == "default":
+            c["vg_binary"] = VG
     return conditions
 
 
@@ -311,6 +344,35 @@ mv $OUT/filter_summary.tsv.tmp $OUT/filter_summary.tsv
 mv $OUT/minimizer_summary.tsv.tmp $OUT/minimizer_summary.tsv
 column -t -s$'\\t' $OUT/minimizer_summary.tsv
 """
+
+
+def prepare_scripts():
+    """One-time jobs per graph, independent of the reads: (name, sbatch text)."""
+    log = DATA_DIR / "logs"
+    paths_meta = DATA_DIR / "graph.paths_meta.tsv"
+    length = DATA_DIR / "graph.length.txt"
+    return [
+        # List path metadata of the graph and summarize which sample is REFERENCE.
+        ("check_paths", sbatch_header("check-paths", "32G", "00:30:00", log / "check_paths.%j.log",
+                                      partition="short", cpus=2) + f"""/usr/bin/time -v {VG} paths -M -x {GBZ} > {paths_meta}
+
+echo "=== path counts by SENSE, SAMPLE"
+awk 'NR>1 {{print $2"\\t"$3}}' {paths_meta} | sort | uniq -c
+echo "=== REFERENCE paths (first 40)"
+awk 'NR==1 || $2=="REFERENCE"' {paths_meta} | head -41
+"""),
+        # Build the distance index shared by all seed conditions; record peak memory/time.
+        ("build_dist", sbatch_header("build-dist", "128G", INDEX_TIME, log / "build_dist.%j.log")
+         + f"""/usr/bin/time -v {VG} index -t "$SLURM_CPUS_PER_TASK" -j {DIST}.tmp {GBZ}
+mv {DIST}.tmp {DIST}
+echo "dist index size (bytes): $(stat -c %s {DIST})"
+"""),
+        # Total sequence length of the graph: denominator for index-based seed density.
+        ("graph_length", sbatch_header("graph-length", "32G", "00:30:00", log / "graph_length.%j.log",
+                                       partition="short", cpus=2) + f"""/usr/bin/time -v {VG} stats -l {GBZ} > {length}
+cat {length}
+"""),
+    ]
 
 
 STAGES = {"index": index_script, "map": map_script, "density": density_script}
@@ -681,10 +743,11 @@ def collect(conditions, reads, snapshot=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("stage", choices=sorted(STAGES) + ["filters", "collect"])
+    parser.add_argument("stage", choices=sorted(STAGES) + ["prepare", "filters", "collect"])
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG),
+                        help="tab-separated paths: data_dir, graph, reads_dir, vg (default: config.tsv in this repo)")
     parser.add_argument("--conditions", default="conditions.tsv")
-    parser.add_argument("--reads", default=str(DEFAULT_READS),
-                        help="truth GAM for map/density (default: 1k HG002 HiFi)")
+    parser.add_argument("--reads", help=f"truth GAM for map/density (default: reads_dir/{DEFAULT_READS_NAME})")
     parser.add_argument("--only", nargs="*", help="run only these condition names")
     parser.add_argument("--submit", action="store_true", help="sbatch the generated scripts")
     parser.add_argument("--force", action="store_true", help="index: rebuild even if already built")
@@ -694,6 +757,20 @@ def main():
     args = parser.parse_args()
     if args.reps < 1 or (args.reps > 1 and args.stage != "map"):
         sys.exit("--reps must be >= 1 and only applies to the map stage")
+    load_config(args.config)
+    args.reads = args.reads or str(DEFAULT_READS)
+
+    if args.stage == "prepare":
+        for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
+            directory.mkdir(parents=True, exist_ok=True)
+        for name, text in prepare_scripts():
+            script = DATA_DIR / "jobs" / f"prepare_{name}.sbatch"
+            script.write_text(text)
+            print(f"[{name}] prepare -> {script}")
+            if args.submit:
+                result = subprocess.run(["sbatch", str(script)], check=True, capture_output=True, text=True)
+                print("  " + result.stdout.strip())
+        return
 
     conditions = load_conditions(args.conditions)
     if args.only:
@@ -706,7 +783,8 @@ def main():
         collect(conditions, args.reads, args.snapshot)
         return
     if args.stage == "filters":
-        (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+        for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
+            directory.mkdir(parents=True, exist_ok=True)
         script = DATA_DIR / "jobs" / f"filters_{Path(args.reads).stem}.sbatch"
         script.write_text(filters_script(conditions, args.reads))
         print(f"[{len(conditions)} conditions] filters -> {script}")

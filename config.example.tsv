@@ -1,0 +1,5 @@
+key	value
+data_dir	/path/to/your/data_dir
+graph	/path/to/your/data_dir/graph.gbz
+reads_dir	/path/to/your/reads_dir
+vg	/path/to/your/vg
