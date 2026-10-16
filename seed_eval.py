@@ -15,12 +15,14 @@ Columns:
   index_mem      sbatch --mem for the index job (e.g. 80G). Measured at k=31 on
                  the HG002 sampled graph: plain ~56 GiB -> 80G, -W ~150 GiB -> 256G
   giraffe_args   extra arguments passed verbatim to `vg giraffe` (may be empty)
+  map_mem        sbatch --mem for this condition's map/density jobs (empty: MAP_MEM)
   density_group  only used for result tables and plots
   label          only used for result tables and plots
 
 Stages:
   index    vg minimizer -> indexes/<name>.min + .zipcodes
-  map      giraffe -> annotate -> gamcompare -> stats, on --reads
+  map      giraffe -> annotate -> gamcompare -> stats, on --reads; --reps N runs it
+           N times into <name>/rep1..N (for timing), keeping the GAMs of rep1 only
   density  giraffe --track-provenance on --reads; per-read seed counts
   filters  one small job: per-filter pass/fail totals and kept minimizers from the density run
   collect  (runs locally, no sbatch) parse logs of all stages into
@@ -60,7 +62,7 @@ MAP_TIME = "02:00:00"
 INDEX_TIME = "12:00:00"
 
 REQUIRED_COLUMNS = ["name", "vg_binary", "index_args", "index_mem"]
-OPTIONAL_COLUMNS = ["giraffe_args", "density_group", "label"]
+OPTIONAL_COLUMNS = ["giraffe_args", "map_mem", "density_group", "label"]
 
 
 def load_conditions(path):
@@ -195,11 +197,23 @@ def results_dir(c, reads):
     return DATA_DIR / "results" / Path(reads).stem / c["name"]
 
 
-def map_script(c, reads):
+def map_mem(c):
+    return c["map_mem"] or MAP_MEM
+
+
+def map_script(c, reads, rep=None):
+    """rep None: single run into <name>/. rep i: replicate i into <name>/rep<i>/; GAMs kept for rep 1 only."""
     o = results_dir(c, reads)
-    log = DATA_DIR / "logs" / f"map_{Path(reads).stem}_{c['name']}.%j.log"
+    suffix = ""
+    if rep is not None:
+        o = o / f"rep{rep}"
+        suffix = f"_rep{rep}"
+    log = DATA_DIR / "logs" / f"map_{Path(reads).stem}_{c['name']}{suffix}.%j.log"
     vg = c["vg_binary"]
-    return sbatch_header(f"map-{c['name']}", MAP_MEM, MAP_TIME, log) + require_index(c) + f"""O={o}
+    cleanup = ""
+    if rep is not None and rep > 1:
+        cleanup = "# Replicates beyond the first are for timing; keep only their statistics.\nrm $O/mapped.gam $O/annot.gam\n"
+    return sbatch_header(f"map-{c['name']}{suffix}", map_mem(c), MAP_TIME, log) + require_index(c) + f"""O={o}
 mkdir -p $O
 /usr/bin/time -v -o $O/giraffe.time {giraffe_cmd(c, reads)} \\
     --report-name $O/report.tsv > $O/mapped.gam.tmp 2> $O/giraffe.log
@@ -212,7 +226,7 @@ mv $O/annot.gam.tmp $O/annot.gam
 mv $O/compare.tsv.tmp $O/compare.tsv
 {vg} stats -a $O/mapped.gam > $O/stats.txt.tmp
 mv $O/stats.txt.tmp $O/stats.txt
-""" + run_info(c, o) + """cat $O/gamcompare.txt
+""" + cleanup + run_info(c, o) + """cat $O/gamcompare.txt
 """
 
 
@@ -223,7 +237,7 @@ def density_script(c, reads):
     # stage.seed.results: seeds giraffe actually uses after filtering
     jq_filter = ('[.name, (.sequence|length), (.annotation.stage.minimizer.results // "NA"), '
                  '(.annotation.stage.seed.results // "NA")] | @tsv')
-    return sbatch_header(f"dens-{c['name']}", MAP_MEM, MAP_TIME, log) + require_index(c) + f"""command -v jq > /dev/null || {{ echo "jq not found on $(hostname)" >&2; exit 1; }}
+    return sbatch_header(f"dens-{c['name']}", map_mem(c), MAP_TIME, log) + require_index(c) + f"""command -v jq > /dev/null || {{ echo "jq not found on $(hostname)" >&2; exit 1; }}
 O={o}
 mkdir -p $O
 {giraffe_cmd(c, reads, "--track-provenance")} > $O/prov.gam.tmp 2> $O/giraffe.log
@@ -513,9 +527,12 @@ def main():
     parser.add_argument("--only", nargs="*", help="run only these condition names")
     parser.add_argument("--submit", action="store_true", help="sbatch the generated scripts")
     parser.add_argument("--force", action="store_true", help="index: rebuild even if already built")
+    parser.add_argument("--reps", type=int, default=1, help="map: number of replicate runs (default 1)")
     parser.add_argument("--snapshot", action="store_true",
                         help="collect: also copy the summaries to results_summary/<reads>/ in this repo")
     args = parser.parse_args()
+    if args.reps < 1 or (args.reps > 1 and args.stage != "map"):
+        sys.exit("--reps must be >= 1 and only applies to the map stage")
 
     conditions = load_conditions(args.conditions)
     if args.only:
@@ -542,15 +559,19 @@ def main():
     (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
 
     tag = "" if args.stage == "index" else f"_{Path(args.reads).stem}"
+    reps = [None] if args.reps == 1 else list(range(1, args.reps + 1))
     for c in conditions:
         if not check_index_params(c, args.stage, args.force):
             continue
-        script = jobs_dir / f"{args.stage}{tag}_{c['name']}.sbatch"
-        script.write_text(STAGES[args.stage](c, args.reads))
-        print(f"[{c['name']}] {args.stage} -> {script}")
-        if args.submit:
-            result = subprocess.run(["sbatch", str(script)], check=True, capture_output=True, text=True)
-            print("  " + result.stdout.strip())
+        for rep in reps:
+            rep_tag = "" if rep is None else f"_rep{rep}"
+            script = jobs_dir / f"{args.stage}{tag}_{c['name']}{rep_tag}.sbatch"
+            text = map_script(c, args.reads, rep) if args.stage == "map" else STAGES[args.stage](c, args.reads)
+            script.write_text(text)
+            print(f"[{c['name']}] {args.stage}{rep_tag} -> {script}")
+            if args.submit:
+                result = subprocess.run(["sbatch", str(script)], check=True, capture_output=True, text=True)
+                print("  " + result.stdout.strip())
 
 
 if __name__ == "__main__":
