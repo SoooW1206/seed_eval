@@ -111,8 +111,8 @@ scripts to `DATA_DIR/jobs/` and prints them; add `--submit` to submit.
 |---|---|---|
 | index | `python3 seed_eval.py index [--force] --submit` | `indexes/<name>.min`, `.zipcodes`, `.params`; skipped if already built with the same parameters |
 | map | `python3 seed_eval.py map --reads GAM [--reps N] --submit` | `results/<reads>/<name>/`: `mapped.gam`, `annot.gam`, `compare.tsv`, `gamcompare.txt`, `giraffe.log`, `stats.txt`, `*.time`, `report.tsv`, `run_info.tsv` |
-| density | `python3 seed_eval.py density --submit` | `results/<reads>/<name>/density/`: `prov.gam`, `per_read.tsv`, `density_summary.tsv` |
-| filters | `python3 seed_eval.py filters --submit` | one job for all conditions: `results/<reads>/filter_summary.tsv`, `minimizer_summary.tsv` (+ per-condition copies in `density/`) |
+| density | `python3 seed_eval.py density --reads GAM --submit` | `results/<reads>/<name>/density/`: `prov.gam`, `per_read.tsv`, `density_summary.tsv` |
+| filters | `python3 seed_eval.py filters --reads GAM --submit` | one job for all conditions: `results/<reads>/filter_summary.tsv`, `minimizer_summary.tsv` (+ per-condition copies in `density/`) |
 | collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `comparison.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
 
 What each job runs:
@@ -123,14 +123,14 @@ What each job runs:
   `vg gamcompare --range 200 -T` against the truth GAM, and `vg stats -a`.
   With `--reps N` it runs N times into `rep1..N/` (for timing); replicates 2..N
   delete their GAMs after their statistics are written.
-- **density**: giraffe with `--track-provenance` on the 1k reads; for each read,
+- **density**: giraffe with `--track-provenance` on the read set; for each read,
   `stage.minimizer.results` (seeds the scheme picks in the read, before giraffe's
   filters) and `stage.seed.results` (graph hits of the minimizers giraffe keeps).
-  Seed density is a property of the scheme, so it is measured once on 1k reads and
-  reused for larger read sets.
-- **filters**: per giraffe funnel filter, how many minimizers pass and fail.
+  Run it on every read set: `collect` only uses the density run of the same read set.
+- **filters**: per giraffe funnel filter, how many minimizers pass and fail, plus
+  seeds per read (median, mean, 90th percentile).
 
-Typical order: index → density (1k) and map (each read set) → filters → collect.
+Typical order: index → for each read set: map and density → filters → collect.
 
 ## Outputs
 
@@ -152,21 +152,26 @@ Typical order: index → density (1k) and map (each read set) → filters → co
 | `index_min_gb`, `index_zipcodes_gb`, `index_build_min`, `index_peak_gib` | index sizes, build time and peak memory |
 | `occurrences` | `Minimizer occurrences` reported by `vg minimizer` |
 | `density_graph` | `occurrences / graph length` (graph length from `graph_length.sbatch`) |
-| `density_reads`, `density_reads_source` | **main density measure**: seeds picked per bp of read (`stage.minimizer.results / length`), and the read set it was measured on |
+| `density_reads` | **main density measure**: seeds picked per bp of read (`stage.minimizer.results / length`) |
+| `seeds_per_read_median`, `seeds_per_read_mean`, `seeds_per_read_p90` | seeds per read (`stage.seed.results`, graph hits of the kept minimizers): median, mean and nearest-rank 90th percentile |
 | `kept_minimizers_per_read` | minimizers left after giraffe's filters, per read |
 | `mean_hits_per_kept_minimizer` | `stage.seed.results / kept minimizers`: how many graph hits each kept minimizer has on average |
 
 ### Plots
 
 `comparison.png` has one bar per condition: mismapped reads as % of eligible with a
-95% Wilson interval (labelled `wrong/eligible`), mapping speed, and mean graph hits
-per kept minimizer. Blue bars are tested conditions, gray is the `reference` group.
+95% Wilson interval (labelled `wrong/eligible`), mapping speed, and seeds per read on
+the same read set (solid bar: median, light bar: mean). Blue bars are tested
+conditions, gray is the `reference` group. Seed columns are only filled from a density
+run on the same read set; without one they are `NA`, and if no condition has one the
+seeds panel is left out.
 
 ### Filter summaries
 
 `filter_summary.tsv` lists, per condition and giraffe funnel filter, the number of
 items passing and failing; the `minimizer` stage filters act on minimizers.
-`minimizer_summary.tsv` gives picked, kept and hit counts per condition.
+`minimizer_summary.tsv` gives picked, kept and hit counts and seeds per read
+(median, mean, 90th percentile) per condition.
 
 ### Note on speed
 

@@ -284,10 +284,16 @@ if [ -s $D/prov.gam ]; then
         END {{ for (i = 1; i <= n; i++) {{ split(order[i], k, SUBSEP)
             print name, k[1], k[2], k[3], passed[order[i]], failed[order[i]] }} }}' $D/filter_lines.tmp \\
         | sort -t$'\\t' -k2,2n > $D/filters.tsv
-    awk -F'\\t' -v OFS='\\t' -v name={c['name']} '$1 == "R" && $3 != "NA" {{ reads++; picked += $2; kept += $3; hits += $4 }}
+    # Seeds per read (stage.seed.results) from per_read.tsv: median, mean, nearest-rank 90th percentile.
+    read SEED_MEDIAN SEED_MEAN SEED_P90 < <(awk -F'\\t' 'NR > 1 && $4 != "NA" {{ print $4 }}' $D/per_read.tsv | sort -n \\
+        | awk '{{ a[NR] = $1; s += $1 }} END {{ k = int(0.9 * NR); if (k < 0.9 * NR) k++
+              print (NR % 2 ? a[(NR + 1) / 2] : (a[NR / 2] + a[NR / 2 + 1]) / 2), s / NR, a[k] }}')
+    awk -F'\\t' -v OFS='\\t' -v name={c['name']} -v med="$SEED_MEDIAN" -v mean="$SEED_MEAN" -v p90="$SEED_P90" \\
+        '$1 == "R" && $3 != "NA" {{ reads++; picked += $2; kept += $3; hits += $4 }}
         END {{ print "name", "reads", "picked_minimizers", "kept_minimizers", "kept_minimizer_hits",
-                     "kept_minimizers_per_read", "mean_hits_per_kept_minimizer"
-               print name, reads, picked, kept, hits, kept / reads, hits / kept }}' $D/filter_lines.tmp > $D/minimizers.tsv
+                     "kept_minimizers_per_read", "mean_hits_per_kept_minimizer",
+                     "seeds_per_read_median", "seeds_per_read_mean", "seeds_per_read_p90"
+               print name, reads, picked, kept, hits, kept / reads, hits / kept, med, mean, p90 }}' $D/filter_lines.tmp > $D/minimizers.tsv
     rm $D/filter_lines.tmp
     cat $D/filters.tsv >> $OUT/filter_summary.tsv.tmp
     tail -n +2 $D/minimizers.tsv >> $OUT/minimizer_summary.tsv.tmp
@@ -298,7 +304,7 @@ fi
     return sbatch_header(f"filters-{reads_set}", "4G", "00:30:00", log, partition="short", cpus=1) + f"""command -v jq > /dev/null || {{ echo "jq not found on $(hostname)" >&2; exit 1; }}
 OUT={out_dir}
 printf 'name\\torder\\tfilter\\tstage\\tpassed\\tfailed\\n' > $OUT/filter_summary.tsv.tmp
-printf 'name\\treads\\tpicked_minimizers\\tkept_minimizers\\tkept_minimizer_hits\\tkept_minimizers_per_read\\tmean_hits_per_kept_minimizer\\n' \\
+printf 'name\\treads\\tpicked_minimizers\\tkept_minimizers\\tkept_minimizer_hits\\tkept_minimizers_per_read\\tmean_hits_per_kept_minimizer\\tseeds_per_read_median\\tseeds_per_read_mean\\tseeds_per_read_p90\\n' \\
     > $OUT/minimizer_summary.tsv.tmp
 {body}
 mv $OUT/filter_summary.tsv.tmp $OUT/filter_summary.tsv
@@ -315,7 +321,8 @@ RESULT_COLUMNS = [
     "reads_per_sec_per_thread", "speed_min", "speed_max", "reps", "reps_consistent",
     "giraffe_mem_gb", "giraffe_wall_s",
     "index_min_gb", "index_zipcodes_gb", "index_build_min", "index_peak_gib",
-    "occurrences", "density_graph", "density_reads", "density_reads_source",
+    "occurrences", "density_graph", "density_reads",
+    "seeds_per_read_median", "seeds_per_read_mean", "seeds_per_read_p90",
     "kept_minimizers_per_read", "mean_hits_per_kept_minimizer",
 ]
 
@@ -411,20 +418,27 @@ def collect_row(c, reads_set, graph_length):
         if row["occurrences"] is not None and graph_length:
             row["density_graph"] = row["occurrences"] / graph_length
 
-    # Seed density is a property of the scheme, so fall back to the default read set's measurement.
-    for source in dict.fromkeys([reads_set, DEFAULT_READS.stem]):
-        summary = read_density_summary(DATA_DIR / "results" / source / c["name"] / "density" / "density_summary.tsv")
-        if summary is not None:
-            row["density_reads"] = float(summary["density_pooled"])
-            row["density_reads_source"] = source
-            break
-    for source in dict.fromkeys([reads_set, DEFAULT_READS.stem]):
-        summary = read_density_summary(DATA_DIR / "results" / source / c["name"] / "density" / "minimizers.tsv")
-        if summary is not None:
-            row["kept_minimizers_per_read"] = float(summary["kept_minimizers_per_read"])
-            row["mean_hits_per_kept_minimizer"] = float(summary["mean_hits_per_kept_minimizer"])
-            break
+    # Seed statistics come from the density run on this same read set only; without it they stay NA.
+    density_dir = DATA_DIR / "results" / reads_set / c["name"] / "density"
+    summary = read_density_summary(density_dir / "density_summary.tsv")
+    if summary is not None:
+        row["density_reads"] = float(summary["density_pooled"])
+        row.update(seed_stats(density_dir / "per_read.tsv"))
+    summary = read_density_summary(density_dir / "minimizers.tsv")
+    if summary is not None:
+        row["kept_minimizers_per_read"] = float(summary["kept_minimizers_per_read"])
+        row["mean_hits_per_kept_minimizer"] = float(summary["mean_hits_per_kept_minimizer"])
     return row
+
+
+def seed_stats(per_read):
+    """Median, mean and nearest-rank 90th percentile of seeds per read (stage.seed.results)."""
+    with open(per_read, newline="") as f:
+        seeds = sorted(int(r["seeds"]) for r in csv.DictReader(f, delimiter="\t") if r["seeds"] != "NA")
+    if not seeds:
+        return {}
+    return {"seeds_per_read_median": statistics.median(seeds), "seeds_per_read_mean": statistics.mean(seeds),
+            "seeds_per_read_p90": seeds[math.ceil(0.9 * len(seeds)) - 1]}
 
 
 def format_value(value):
@@ -455,7 +469,10 @@ def plot_comparison(rows, path, reads_set):
     colors = [reference_color if r["density_group"] == "reference" else test_color for r in rows]
     x = range(len(rows))
 
-    fig, (ax_err, ax_speed, ax_hits) = plt.subplots(1, 3, figsize=(14, 4.4))
+    # The seeds panel needs this read set's density runs; leave it out if none exist.
+    has_seeds = any(r.get("seeds_per_read_median") is not None for r in rows)
+    fig, axes = plt.subplots(1, 3 if has_seeds else 2, figsize=(14 if has_seeds else 10, 4.4))
+    ax_err, ax_speed = axes[0], axes[1]
     error = [100 * r["wrong"] / r["eligible"] for r in rows]
     bounds = [wilson_interval(r["wrong"], r["eligible"]) for r in rows]
     yerr = [[e - 100 * lo for e, (lo, hi) in zip(error, bounds)],
@@ -477,15 +494,25 @@ def plot_comparison(rows, path, reads_set):
     ax_speed.set_title("Mapping speed (reads / s / thread, median of reps)", fontsize=11, color=ink, loc="left")
     ax_speed.set_ylim(0, 1.15 * max(speed))
 
-    hits = [r.get("mean_hits_per_kept_minimizer") or 0 for r in rows]
-    ax_hits.bar(x, hits, color=colors, width=0.6)
-    for i, h in zip(x, hits):
-        ax_hits.annotate(f"{h:.2f}", (i, h), xytext=(0, 4), textcoords="offset points",
-                         ha="center", fontsize=9, color=ink)
-    ax_hits.set_title("Graph hits per kept minimizer (mean)", fontsize=11, color=ink, loc="left")
-    ax_hits.set_ylim(0, 1.15 * max(hits) if max(hits) > 0 else 1)
+    if has_seeds:
+        # Solid bar: median seeds per read; light bar: mean (pulled up by a few repetitive reads).
+        ax_seeds = axes[2]
+        width = 0.38
+        for i, r in zip(x, rows):
+            for offset, stat, alpha in ((-width / 2, "median", 1.0), (width / 2, "mean", 0.4)):
+                value = r.get(f"seeds_per_read_{stat}")
+                if value is None:
+                    continue
+                ax_seeds.bar(i + offset, value, width=width, color=colors[i], alpha=alpha,
+                             edgecolor="#fcfcfb", linewidth=2)
+                ax_seeds.annotate(f"{value:.0f}", (i + offset, value), xytext=(0, 3), textcoords="offset points",
+                                  ha="center", fontsize=7, color=ink)
+        top = max(r.get("seeds_per_read_mean") or 0 for r in rows)
+        ax_seeds.set_ylim(0, 1.15 * top if top > 0 else 1)
+        ax_seeds.set_title(f"Seeds per read on {reads_set}\n(solid: median, light: mean)",
+                           fontsize=11, color=ink, loc="left")
 
-    for ax in (ax_err, ax_speed, ax_hits):
+    for ax in axes:
         ax.set_xticks(list(x))
         ax.set_xticklabels(names, rotation=20, ha="right", fontsize=9, color=ink)
         ax.set_facecolor("#fcfcfb")
@@ -521,6 +548,10 @@ def collect(conditions, reads, snapshot=False):
     print(f"wrote {table} ({len(rows)} conditions)")
     if skipped:
         print(f"skipped (no map results for {reads_set}): {[r['name'] for r in skipped]}")
+    no_density = [r["name"] for r in rows if r.get("seeds_per_read_median") is None]
+    if no_density:
+        print(f"no density run on {reads_set} for {no_density}: their seed columns are NA"
+              + ("" if len(no_density) < len(rows) else " and the seeds panel is left out"))
     inconsistent = [r["name"] for r in rows if r.get("reps_consistent") == "no"]
     if inconsistent:
         print(f"WARNING: replicates disagree on the number of correct reads: {inconsistent}")
