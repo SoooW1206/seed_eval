@@ -9,5 +9,4 @@ handoff/
 *.fastq
 *.gz
 __pycache__/
-.claude/
 config.tsv
