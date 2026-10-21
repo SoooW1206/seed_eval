@@ -238,6 +238,27 @@ items passing and failing; the `minimizer` stage filters act on minimizers.
 Mapping speed depends on how busy the compute node is, so it can vary between runs.
 Use replicates (`--reps`) on a large read set and treat small differences with caution.
 
+## Minimaxmer prototype (`prototype/`)
+
+Work in progress. `prototype/minimaxmer.py` is a Python prototype of minimaxmer
+selection (Yoshi Suzuki's [himapper_rp](https://github.com/yoshihikosuzuki/himapper_rp)):
+in each window of `w` k-mers it picks the minimum of
+`(genome_count, -reads_count, hash)`, i.e. a k-mer rare in the genome and common in the
+reads (step 1), and counts the windows each one wins (step 2). Yoshi's step 3 (uniformly
+sparse thinning) is not implemented. The k-mer encoding, hash (`wang_hash_64`), canonical
+orientation and tie rule follow gbwtgraph, so with constant counts the selection is
+exactly vg's `(w, k)`-minimizers; as in Yoshi's code, k-mers absent from the genome
+(count 0) are not candidates. Genome counts are a placeholder (all 1) for now.
+
+`prototype/test_minimaxmer.py` tests it on synthetic sequences. `prototype/vg_oracle.cpp`
+is a small program that prints gbwtgraph's own k-mer codes, hashes and minimizers; build
+it against the vg tree (command in its header) and pass it with `--oracle` to compare
+the prototype with gbwtgraph directly:
+
+```bash
+python3 -I prototype/test_minimaxmer.py --oracle /path/to/vg_oracle
+```
+
 ## Safeguards
 
 - **Index provenance.** Each index job writes `indexes/<name>.params` (vg binary and
