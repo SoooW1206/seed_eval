@@ -20,10 +20,11 @@ With constant counts the selection is exactly gbwtgraph's (w, k)-minimizers.
 As in Yoshi's code, k-mers with genome_count == 0 are not candidates (skip_absent).
 
 Command line (statistics only, never sequences):
-    python3 -I minimaxmer.py --k 31 --w 20 --stats < sequences.txt
-reads one sequence per line, counts the k-mers of all of them for reads_count,
-uses a constant genome_count of 1, and prints per-read selection counts
-(--per-read FILE) and a summary.
+    vg view -aj reads.gam | jq -r '[.name, .sequence] | @tsv' | python3 -I minimaxmer.py --k 31 --w 20
+reads "name<TAB>sequence" lines, counts the k-mers of all reads for reads_count
+(or uses a constant reads_count with --constant-counts), uses a constant
+genome_count of 1, writes per-read selection counts (--per-read FILE: read name,
+length, selected) and prints a summary.
 """
 import argparse
 import collections
@@ -136,27 +137,40 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--k", type=int, default=31)
     parser.add_argument("--w", type=int, default=20)
-    parser.add_argument("--per-read", help="write read index, length and number of selected k-mers here")
+    parser.add_argument("--constant-counts", action="store_true",
+                        help="constant reads_count too: the selection is then exactly vg's minimizers")
+    parser.add_argument("--per-read", help="write read name, length and number of selected k-mers here")
     args = parser.parse_args()
 
-    sequences = [line.strip() for line in sys.stdin if line.strip()]
+    names, sequences = [], []
+    for line in sys.stdin:
+        if line.strip():
+            name, seq = line.rstrip("\n").split("\t")
+            names.append(name)
+            sequences.append(seq)
+    if len(set(names)) != len(names):
+        sys.exit("duplicate read names in the input")
     reads = collections.Counter()
-    for seq in sequences:
-        reads.update(kmer[0] for kmer in canonical_kmers(seq, args.k) if kmer is not None)
+    if not args.constant_counts:
+        for seq in sequences:
+            reads.update(kmer[0] for kmer in canonical_kmers(seq, args.k) if kmer is not None)
+    reads_count = None if args.constant_counts else reads.__getitem__
     per_read, total_bp, total_selected, total_wins = [], 0, 0, collections.Counter()
-    for index, seq in enumerate(sequences):
-        selected, wins = select_minimaxmers(seq, args.k, args.w, reads_count=reads.__getitem__)
-        per_read.append((index, len(seq), len(selected)))
+    for name, seq in zip(names, sequences):
+        selected, wins = select_minimaxmers(seq, args.k, args.w, reads_count=reads_count)
+        per_read.append((name, len(seq), len(selected)))
         total_bp += len(seq)
         total_selected += len(selected)
         total_wins.update(wins.values())
     if args.per_read:
         with open(args.per_read, "w") as f:
-            f.write("read_index\tlength\tselected\n")
-            f.writelines(f"{i}\t{n}\t{s}\n" for i, n, s in per_read)
+            f.write("read\tlength\tselected\n")
+            f.writelines(f"{name}\t{n}\t{s}\n" for name, n, s in per_read)
+    print(f"counts\t{'constant' if args.constant_counts else 'reads_count from these reads, genome_count 1'}")
     print(f"reads\t{len(sequences)}\ntotal_bp\t{total_bp}\nselected\t{total_selected}")
     print(f"density\t{total_selected / total_bp:.6g}\ntheory_2/(w+1)\t{2 / (args.w + 1):.6g}")
-    print(f"distinct_kmers_in_reads\t{len(reads)}\nkmers_seen_once\t{sum(1 for c in reads.values() if c == 1)}")
+    if not args.constant_counts:
+        print(f"distinct_kmers_in_reads\t{len(reads)}\nkmers_seen_once\t{sum(1 for c in reads.values() if c == 1)}")
     print("windows_won\tselected_kmers")
     for won in sorted(total_wins):
         print(f"{won}\t{total_wins[won]}")

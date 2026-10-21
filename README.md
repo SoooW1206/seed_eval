@@ -279,6 +279,20 @@ the prototype with gbwtgraph directly:
 python3 -I prototype/test_minimaxmer.py --oracle /path/to/vg_oracle
 ```
 
+On real reads, `prototype/run_on_reads.sh` (an sbatch script, submitted from the repo
+directory) feeds `name<TAB>sequence` from a GAM through `vg view -aj | jq` into the
+prototype twice: with constant counts (must equal vg's minimizers) and with reads
+counts from those reads. Sequences only pass through pipes; outputs are per-read
+counts (read name, length, selected) and summaries. `prototype/compare_with_vg.py`
+matches these per read **by name** with a density run's `per_read.tsv`, whose
+`minimizers` column is Giraffe's `stage.minimizer.results`:
+
+```bash
+sbatch -o LOG prototype/run_on_reads.sh TRUTH.gam OUT_DIR /path/to/vg
+python3 -I prototype/compare_with_vg.py OUT_DIR/per_read_constant.tsv \
+    data_dir/results/<reads>/<condition>/density/per_read.tsv OUT_DIR/per_read_counted.tsv --out comparison.tsv
+```
+
 ## Safeguards
 
 - **Index provenance.** Each index job writes `indexes/<name>.params` (vg binary and
