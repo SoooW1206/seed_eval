@@ -278,6 +278,11 @@ python3 -I prototype/test_minimaxmer.py --oracle /path/to/vg_oracle
   sweep keeps the preset fixed; these are command-line options and could be varied
   through `giraffe_args`.
 - Small read sets give few errors; use 100k+ reads to compare accuracy.
+- **Mapping was deterministic in our test** (`results_summary/HG002-sim-hifi-100k/determinism_summary.tsv`):
+  for `sync_k31s11` and `default_k31w50W` on the 100k set, three runs plus one run five
+  days earlier gave identical fingerprints for all 100,000 reads. Scope: 2 conditions,
+  100k reads, 384-core nodes only, 16 threads; other conditions, node types or thread
+  counts were not tested.
 - Indexes are large (~24 GB `.min` at density 2/21, ~12 GB at w50).
 - Changing the graph means pointing `graph` in the config at it, re-running `prepare`
   and rebuilding every index (the `.params` check refuses indexes built on another

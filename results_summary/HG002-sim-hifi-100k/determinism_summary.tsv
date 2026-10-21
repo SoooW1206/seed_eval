@@ -1,0 +1,5 @@
+condition	comparison	runs	nodes	reads	identical	score_only	path_diff_same_start	start_diff	mapped_flip	correct_flip
+sync_k31s11	det runs	det/rep1,det/rep2,det/rep3	phoenix-23.prism,phoenix-10.prism,phoenix-09.prism	100000	100000	0	0	0	0	0
+sync_k31s11	det runs + earlier rep1	det/rep1,det/rep2,det/rep3,rep1	phoenix-23.prism,phoenix-10.prism,phoenix-09.prism,phoenix-23.prism	100000	100000	0	0	0	0	0
+default_k31w50W	det runs	det/rep1,det/rep2,det/rep3	phoenix-09.prism,phoenix-09.prism,phoenix-09.prism	100000	100000	0	0	0	0	0
+default_k31w50W	det runs + earlier rep1	det/rep1,det/rep2,det/rep3,rep1	phoenix-09.prism,phoenix-09.prism,phoenix-09.prism,phoenix-23.prism	100000	100000	0	0	0	0	0
