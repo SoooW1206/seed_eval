@@ -50,6 +50,7 @@ Current setup (Paten lab rotation, Oct 2026):
    | `graph` | the graph `.gbz`; the distance index is `<graph>.dist` next to it |
    | `reads_dir` | directory with the truth GAMs; the default read set is `reads_dir/HG002-sim-hifi-1k.gam` |
    | `vg` | vg executable used by rows whose `vg_binary` is `default`, and by `prepare` |
+   | `exclude_nodes` | optional: Slurm node list that `--fixed-nodes` passes to `sbatch --exclude`, to keep runs on one node type |
 
    `config.tsv` is ignored by git. Another file can be passed with `--config FILE`.
 
@@ -136,7 +137,9 @@ becomes `k - 1`. Nothing requires `w >= k`; the vg default is k29 w11.
 Run from the repo directory. Every stage except `collect` only **writes** sbatch
 scripts to `data_dir/jobs/` and prints them; add `--submit` to submit.
 `--only NAME ...` restricts to some conditions, `--conditions FILE` uses another table,
-`--reads GAM` picks the truth read set (default: 1k).
+`--reads GAM` picks the truth read set (default: 1k). On `--submit`, `--fixed-nodes`
+adds `--exclude=<exclude_nodes>` and `--sbatch-args "..."` adds any other arguments to
+the `sbatch` command line; the generated scripts do not change.
 
 | Stage | Command | Output |
 |---|---|---|
@@ -145,6 +148,8 @@ scripts to `data_dir/jobs/` and prints them; add `--submit` to submit.
 | density | `python3 seed_eval.py density --reads GAM --submit` | `results/<reads>/<name>/density/`: `prov.gam`, `per_read.tsv`, `density_summary.tsv` |
 | filters | `python3 seed_eval.py filters --reads GAM --submit` | one job for all conditions: `results/<reads>/filter_summary.tsv`, `minimizer_summary.tsv` (+ per-condition copies in `density/`) |
 | collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
+| fingerprint | `python3 seed_eval.py fingerprint --reads GAM [--run-tag TAG] --submit` | one job per run that has a `mapped.gam` (`<name>/rep*`, or `<name>/TAG/rep*`): `fingerprint.tsv` in the run directory |
+| determinism | `python3 seed_eval.py determinism --reads GAM --run-tag TAG` | runs locally: `results/<reads>/determinism/summary.tsv`, `reads.tsv` |
 
 What each job runs:
 
@@ -153,15 +158,30 @@ What each job runs:
   then `vg annotate -m --search-limit=-1` (positions on reference paths),
   `vg gamcompare --range 200 -T` against the truth GAM, and `vg stats -a`.
   With `--reps N` it runs N times into `rep1..N/` (for timing); replicates 2..N
-  delete their GAMs after their statistics are written.
+  delete their GAMs after their statistics are written. `--run-tag TAG` writes the
+  runs to `<name>/TAG/rep1..N/` instead (kept apart from the default runs, which
+  `collect` reads), and `--keep-gams` keeps the GAMs of every replicate.
 - **density**: giraffe with `--track-provenance` on the read set; for each read,
   `stage.minimizer.results` (seeds the scheme picks in the read, before giraffe's
   filters) and `stage.seed.results` (graph hits of the minimizers giraffe keeps).
   Run it on every read set: `collect` only uses the density run of the same read set.
 - **filters**: per giraffe funnel filter, how many minimizers pass and fail, plus
   seeds per read (median, mean, 90th percentile).
+- **fingerprint**: `vg view -aj mapped.gam | jq` keeps, per read, the name, MAPQ,
+  score, identity, number of mappings, start (`node:offset:strand`) and a hash of the
+  path (nodes, offsets, strands and edit lengths; no read bases). The job checks that
+  there is one row per alignment and no duplicate read names.
+- **determinism**: compares the fingerprints of the `TAG` replicates **by read name**
+  (threaded Giraffe writes reads in any order), and separately together with the
+  earlier `rep1/` run if it has a fingerprint. Each read is `identical`, `score_only`
+  (same path, different MAPQ/score/identity), `path_diff_same_start`, `start_diff` or
+  `mapped_flip`; `correct_flip` counts reads whose gamcompare verdict differs between
+  runs. `summary.tsv` has one row per comparison; `reads.tsv` lists only reads that
+  differ, one row per run, with the node it ran on.
 
 Typical order: index → for each read set: map and density → filters → collect.
+To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nodes`
+→ `fingerprint --run-tag det` (and `fingerprint` for an earlier `rep1/`) → `determinism --run-tag det`.
 
 ## Outputs
 

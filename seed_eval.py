@@ -30,7 +30,12 @@ Stages:
   index    vg minimizer -> indexes/<name>.min + .zipcodes
   map      giraffe -> annotate -> gamcompare -> stats, on --reads; --reps N runs it
            N times into <name>/rep1..N (for timing), keeping the GAMs of rep1 only
+           --run-tag TAG writes <name>/TAG/rep1..N instead; --keep-gams keeps every replicate's GAMs
   density  giraffe --track-provenance on --reads; per-read seed counts
+  fingerprint  one small job per run with a mapped.gam: per-read MAPQ, score, identity, start and a
+           hash of the path (no read bases), into fingerprint.tsv
+  determinism  (runs locally) compare fingerprints of the --run-tag replicates by read name, and
+           separately together with the earlier rep1; writes results/<reads>/determinism/
   filters  one small job: per-filter pass/fail totals and kept minimizers from the density run
   collect  (runs locally, no sbatch) parse logs of all stages into
            results/<reads>/results.tsv and results/<reads>/comparison.png;
@@ -47,6 +52,7 @@ import csv
 import functools
 import math
 import re
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -57,9 +63,12 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = REPO_DIR / "config.tsv"
 CONFIG_KEYS = ["data_dir", "graph", "reads_dir", "vg"]
+# Optional config key: exclude_nodes, a Slurm node list that --fixed-nodes passes to sbatch --exclude
+# (to keep runs on one node type).
 DEFAULT_READS_NAME = "HG002-sim-hifi-1k.gam"  # default truth GAM, inside reads_dir
 # Paths come from the config file; load_config() sets them before anything else runs.
 DATA_DIR = GBZ = DIST = READS_DIR = DEFAULT_READS = VG = None
+EXCLUDE_NODES = ""
 PARTITION = "medium"
 THREADS = 16  # vg minimizer: more than 16 threads rarely helps
 GIRAFFE_PRESET = "hifi"
@@ -75,7 +84,7 @@ OPTIONAL_COLUMNS = ["giraffe_args", "map_mem", "density_group", "label"]
 def load_config(path):
     """Read key/value paths (tab-separated) and set DATA_DIR, GBZ, DIST, READS_DIR, DEFAULT_READS and VG.
     The distance index is expected next to the graph, with .dist in place of .gbz."""
-    global DATA_DIR, GBZ, DIST, READS_DIR, DEFAULT_READS, VG
+    global DATA_DIR, GBZ, DIST, READS_DIR, DEFAULT_READS, VG, EXCLUDE_NODES
     if not Path(path).is_file():
         sys.exit(f"{path}: config file not found; copy config.example.tsv to config.tsv and fill in your paths")
     config = {}
@@ -94,6 +103,7 @@ def load_config(path):
     READS_DIR = Path(config["reads_dir"])
     DEFAULT_READS = READS_DIR / DEFAULT_READS_NAME
     VG = config["vg"]
+    EXCLUDE_NODES = config.get("exclude_nodes", "")
 
 
 def load_conditions(path):
@@ -235,17 +245,21 @@ def map_mem(c):
     return c["map_mem"] or MAP_MEM
 
 
-def map_script(c, reads, rep=None):
-    """rep None: single run into <name>/. rep i: replicate i into <name>/rep<i>/; GAMs kept for rep 1 only."""
+def map_script(c, reads, rep=None, run_tag=None, keep_gams=False):
+    """rep None: single run into <name>/. rep i: replicate i into <name>/rep<i>/; GAMs kept for rep 1 only
+    unless keep_gams. run_tag puts the runs under <name>/<run_tag>/ so they never mix with the default runs."""
     o = results_dir(c, reads)
     suffix = ""
+    if run_tag:
+        o = o / run_tag
+        suffix = f"_{run_tag}"
     if rep is not None:
         o = o / f"rep{rep}"
-        suffix = f"_rep{rep}"
+        suffix += f"_rep{rep}"
     log = DATA_DIR / "logs" / f"map_{Path(reads).stem}_{c['name']}{suffix}.%j.log"
     vg = c["vg_binary"]
     cleanup = ""
-    if rep is not None and rep > 1:
+    if rep is not None and rep > 1 and not keep_gams:
         cleanup = "# Replicates beyond the first are for timing; keep only their statistics.\nrm $O/mapped.gam $O/annot.gam\n"
     return sbatch_header(f"map-{c['name']}{suffix}", map_mem(c), MAP_TIME, log) + require_index(c) + f"""O={o}
 mkdir -p $O
@@ -373,6 +387,134 @@ echo "dist index size (bytes): $(stat -c %s {DIST})"
 cat {length}
 """),
     ]
+
+
+# One line per alignment: name, MAPQ, score, identity, number of mappings, start (node:offset:strand) and
+# a path signature (nodes, offsets, strands, edit lengths). Read bases never leave jq.
+FINGERPRINT_JQ = (
+    '(.path.mapping // []) as $m | [.name, (.mapping_quality // 0), (.score // 0), (.identity // 0), ($m | length), '
+    '($m[0].position | "\\(.node_id // "NA"):\\(.offset // 0):\\(if .is_reverse then "-" else "+" end)"), '
+    '($m | map("\\(.position.node_id):\\(.position.offset // 0):\\(if .position.is_reverse then "-" else "+" end)|" '
+    '+ ((.edit // []) | map("\\(.from_length // 0),\\(.to_length // 0),\\((.sequence // "") | length)") | join(";"))) '
+    '| join(" "))] | @tsv')
+# Replace the path signature (last column) by a short hash.
+FINGERPRINT_PY = r'''import sys, hashlib
+for line in sys.stdin:
+    *fields, signature = line.rstrip("\n").split("\t")
+    print("\t".join(fields + [hashlib.sha1(signature.encode()).hexdigest()[:16]]))'''
+FINGERPRINT_FIELDS = ["mapq", "score", "identity", "n_mappings", "start", "path_hash"]
+
+
+def fingerprint_script(c, run_dir, label):
+    """Job writing run_dir/fingerprint.tsv from run_dir/mapped.gam (Giraffe's own output)."""
+    gam, out = run_dir / "mapped.gam", run_dir / "fingerprint.tsv"
+    log = DATA_DIR / "logs" / f"fingerprint_{label}.%j.log"
+    header = "\\t".join(["read"] + FINGERPRINT_FIELDS)
+    return sbatch_header(f"fp-{label}", "8G", MAP_TIME, log, cpus=2) + f"""for tool in jq python3; do
+    command -v $tool > /dev/null || {{ echo "$tool not found on $(hostname)" >&2; exit 1; }}
+done
+[ -s {gam} ] || {{ echo "missing {gam}" >&2; exit 1; }}
+{{ printf '{header}\\n'
+  {c['vg_binary']} view -aj {gam} | jq -r '{FINGERPRINT_JQ}' | python3 -I -c '{FINGERPRINT_PY}'; }} > {out}.tmp
+rows=$(($(wc -l < {out}.tmp) - 1))
+unique=$(tail -n +2 {out}.tmp | cut -f1 | sort -u | wc -l)
+alignments=$(grep -oP 'Total alignments: \\K\\d+' {run_dir}/stats.txt)
+echo "rows=$rows unique_names=$unique total_alignments=$alignments"
+[ "$rows" = "$unique" ] || {{ echo "duplicate read names in the fingerprint" >&2; exit 1; }}
+[ "$rows" = "$alignments" ] || {{ echo "fingerprint rows differ from vg stats -a" >&2; exit 1; }}
+mv {out}.tmp {out}
+"""
+
+
+def fingerprint_runs(c, reads, run_tag):
+    """Run directories (with a mapped.gam) of one condition: <name>/<run_tag>/rep* if run_tag, else <name>/rep*."""
+    base = results_dir(c, reads) / run_tag if run_tag else results_dir(c, reads)
+    runs = sorted((p for p in base.glob("rep*") if re.fullmatch(r"rep\d+", p.name)), key=lambda p: int(p.name[3:]))
+    return [p for p in runs if (p / "mapped.gam").is_file()]
+
+
+def read_compare(path):
+    """read name -> (eligible, correct, mapq) from a gamcompare -T table."""
+    with open(path, newline="") as f:
+        return {r["read"]: (r["eligible"] == "1", r["correct"] == "1", int(r["mq"]))
+                for r in csv.DictReader(f, delimiter="\t")}
+
+
+def write_table(path, columns, rows):
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([format_value(row.get(col)) for col in columns])
+    print(f"wrote {path} ({len(rows)} rows)")
+
+
+def read_fingerprints(path):
+    """read name -> fingerprint tuple; keyed by name because threaded Giraffe writes reads in any order."""
+    with open(path, newline="") as f:
+        return {r["read"]: tuple(r[k] for k in FINGERPRINT_FIELDS) for r in csv.DictReader(f, delimiter="\t")}
+
+
+def classify(prints):
+    """How a read's fingerprints differ across runs, most severe first."""
+    if len(set(prints)) == 1:
+        return "identical"
+    if len({p[3] == "0" for p in prints}) > 1:
+        return "mapped_flip"
+    if len({p[4] for p in prints}) > 1:
+        return "start_diff"
+    if len({p[5] for p in prints}) > 1:
+        return "path_diff_same_start"
+    return "score_only"
+
+
+DETERMINISM_CATEGORIES = ["identical", "score_only", "path_diff_same_start", "start_diff", "mapped_flip"]
+
+
+def determinism(conditions, reads, run_tag):
+    """Compare per-read fingerprints across the run_tag replicates, and separately with the earlier rep1."""
+    out_dir = DATA_DIR / "results" / Path(reads).stem / "determinism"
+    summary, details = [], []
+    for c in conditions:
+        new = [p for p in fingerprint_runs(c, reads, run_tag) if (p / "fingerprint.tsv").is_file()]
+        old = [p for p in fingerprint_runs(c, reads, None)[:1] if (p / "fingerprint.tsv").is_file()]
+        if len(new) < 2:
+            print(f"[{c['name']}] skipped: fewer than two {run_tag} runs with a fingerprint")
+            continue
+        comparisons = [(f"{run_tag} runs", new)]
+        if old:
+            comparisons.append((f"{run_tag} runs + earlier rep1", new + old))
+        for comparison, runs in comparisons:
+            labels = [str(p.relative_to(results_dir(c, reads))) for p in runs]
+            prints = [read_fingerprints(p / "fingerprint.tsv") for p in runs]
+            if len({frozenset(p) for p in prints}) != 1:
+                sys.exit(f"[{c['name']}] {comparison}: runs do not contain the same reads")
+            correct = [{read: (e, k) for read, (e, k, mq) in read_compare(p / "compare.tsv").items()} for p in runs]
+            nodes = [(read_density_summary(p / "run_info.tsv") or {}).get("host", "NA") for p in runs]
+            counts = dict.fromkeys(DETERMINISM_CATEGORIES, 0)
+            correct_flips = 0
+            for read in sorted(prints[0]):
+                category = classify([p[read] for p in prints])
+                counts[category] += 1
+                status = [k.get(read) for k in correct]
+                flip = len({s for s in status if s is not None}) > 1
+                correct_flips += flip
+                if category != "identical" or flip:
+                    for label, node, p, s in zip(labels, nodes, prints, status):
+                        details.append({"comparison": comparison, "condition": c["name"], "read": read,
+                                        "category": category, "correct_flip": "yes" if flip else "no",
+                                        "run": label, "node": node, **dict(zip(FINGERPRINT_FIELDS, p[read])),
+                                        "correct": "NA" if s is None else ("yes" if s[1] else "no")})
+            summary.append({"condition": c["name"], "comparison": comparison, "runs": ",".join(labels),
+                            "nodes": ",".join(nodes), "reads": len(prints[0]), **counts,
+                            "correct_flip": correct_flips})
+    if not summary:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_table(out_dir / "summary.tsv", ["condition", "comparison", "runs", "nodes", "reads",
+                                          *DETERMINISM_CATEGORIES, "correct_flip"], summary)
+    write_table(out_dir / "reads.tsv", ["comparison", "condition", "read", "category", "correct_flip", "run", "node",
+                                        *FINGERPRINT_FIELDS, "correct"], details)
 
 
 STAGES = {"index": index_script, "map": map_script, "density": density_script}
@@ -740,10 +882,22 @@ def collect(conditions, reads, snapshot=False):
                 print(f"snapshot {dest / name}")
 
 
+def submit(script, args):
+    """sbatch a generated script; --fixed-nodes and --sbatch-args only change the sbatch command line."""
+    cmd = ["sbatch"]
+    if args.fixed_nodes:
+        if not EXCLUDE_NODES:
+            sys.exit("--fixed-nodes needs exclude_nodes in the config")
+        cmd.append(f"--exclude={EXCLUDE_NODES}")
+    cmd += shlex.split(args.sbatch_args or "")
+    result = subprocess.run(cmd + [str(script)], check=True, capture_output=True, text=True)
+    print("  " + result.stdout.strip())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("stage", choices=sorted(STAGES) + ["prepare", "filters", "collect"])
+    parser.add_argument("stage", choices=sorted(STAGES) + ["prepare", "filters", "collect", "fingerprint", "determinism"])
     parser.add_argument("--config", default=str(DEFAULT_CONFIG),
                         help="tab-separated paths: data_dir, graph, reads_dir, vg (default: config.tsv in this repo)")
     parser.add_argument("--conditions", default="conditions.tsv")
@@ -752,11 +906,24 @@ def main():
     parser.add_argument("--submit", action="store_true", help="sbatch the generated scripts")
     parser.add_argument("--force", action="store_true", help="index: rebuild even if already built")
     parser.add_argument("--reps", type=int, default=1, help="map: number of replicate runs (default 1)")
+    parser.add_argument("--run-tag", help="map/fingerprint/determinism: runs live in <name>/<run-tag>/ "
+                                          "(apart from the default runs)")
+    parser.add_argument("--keep-gams", action="store_true", help="map: keep the GAMs of every replicate")
+    parser.add_argument("--fixed-nodes", action="store_true",
+                        help="submit with sbatch --exclude=<exclude_nodes from the config>")
+    parser.add_argument("--sbatch-args", help="extra arguments added to the sbatch command line on --submit")
     parser.add_argument("--snapshot", action="store_true",
                         help="collect: also copy the summaries to results_summary/<reads>/ in this repo")
     args = parser.parse_args()
     if args.reps < 1 or (args.reps > 1 and args.stage != "map"):
         sys.exit("--reps must be >= 1 and only applies to the map stage")
+    if args.keep_gams and args.stage != "map":
+        sys.exit("--keep-gams only applies to the map stage")
+    if args.run_tag and (args.stage not in ("map", "fingerprint", "determinism")
+                         or not re.fullmatch(r"[A-Za-z0-9_-]+", args.run_tag) or re.fullmatch(r"rep\d+", args.run_tag)):
+        sys.exit("--run-tag applies to map/fingerprint/determinism and must be a simple name other than rep<N>")
+    if args.stage == "determinism" and not args.run_tag:
+        sys.exit("determinism needs --run-tag (the replicate runs to compare)")
     load_config(args.config)
     args.reads = args.reads or str(DEFAULT_READS)
 
@@ -768,8 +935,7 @@ def main():
             script.write_text(text)
             print(f"[{name}] prepare -> {script}")
             if args.submit:
-                result = subprocess.run(["sbatch", str(script)], check=True, capture_output=True, text=True)
-                print("  " + result.stdout.strip())
+                submit(script, args)
         return
 
     conditions = load_conditions(args.conditions)
@@ -789,8 +955,25 @@ def main():
         script.write_text(filters_script(conditions, args.reads))
         print(f"[{len(conditions)} conditions] filters -> {script}")
         if args.submit:
-            result = subprocess.run(["sbatch", str(script)], check=True, capture_output=True, text=True)
-            print("  " + result.stdout.strip())
+            submit(script, args)
+        return
+    if args.stage == "determinism":
+        determinism(conditions, args.reads, args.run_tag)
+        return
+    if args.stage == "fingerprint":
+        for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
+            directory.mkdir(parents=True, exist_ok=True)
+        for c in conditions:
+            runs = fingerprint_runs(c, args.reads, args.run_tag)
+            if not runs:
+                print(f"[{c['name']}] no runs with a mapped.gam" + (f" under {args.run_tag}/" if args.run_tag else ""))
+            for run in runs:
+                label = "_".join([Path(args.reads).stem, c["name"]] + ([args.run_tag] if args.run_tag else []) + [run.name])
+                script = DATA_DIR / "jobs" / f"fingerprint_{label}.sbatch"
+                script.write_text(fingerprint_script(c, run, label))
+                print(f"[{c['name']}] fingerprint {run.relative_to(results_dir(c, args.reads))} -> {script}")
+                if args.submit:
+                    submit(script, args)
         return
 
     jobs_dir = DATA_DIR / "jobs"
@@ -803,14 +986,14 @@ def main():
         if not check_index_params(c, args.stage, args.force):
             continue
         for rep in reps:
-            rep_tag = "" if rep is None else f"_rep{rep}"
+            rep_tag = ("" if not args.run_tag else f"_{args.run_tag}") + ("" if rep is None else f"_rep{rep}")
             script = jobs_dir / f"{args.stage}{tag}_{c['name']}{rep_tag}.sbatch"
-            text = map_script(c, args.reads, rep) if args.stage == "map" else STAGES[args.stage](c, args.reads)
+            text = (map_script(c, args.reads, rep, args.run_tag, args.keep_gams) if args.stage == "map"
+                    else STAGES[args.stage](c, args.reads))
             script.write_text(text)
             print(f"[{c['name']}] {args.stage}{rep_tag} -> {script}")
             if args.submit:
-                result = subprocess.run(["sbatch", str(script)], check=True, capture_output=True, text=True)
-                print("  " + result.stdout.strip())
+                submit(script, args)
 
 
 if __name__ == "__main__":

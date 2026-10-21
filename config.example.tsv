@@ -3,3 +3,5 @@ data_dir	/path/to/your/data_dir
 graph	/path/to/your/data_dir/graph.gbz
 reads_dir	/path/to/your/reads_dir
 vg	/path/to/your/vg
+# optional: Slurm nodes that --fixed-nodes excludes (sbatch --exclude), to keep runs on one node type
+# exclude_nodes	node01,node02
