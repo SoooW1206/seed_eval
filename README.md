@@ -147,7 +147,7 @@ the `sbatch` command line; the generated scripts do not change.
 | map | `python3 seed_eval.py map --reads GAM [--reps N] --submit` | `results/<reads>/<name>/`: `mapped.gam`, `annot.gam`, `compare.tsv`, `gamcompare.txt`, `giraffe.log`, `stats.txt`, `*.time`, `report.tsv`, `run_info.tsv` |
 | density | `python3 seed_eval.py density --reads GAM --submit` | `results/<reads>/<name>/density/`: `prov.gam`, `per_read.tsv`, `density_summary.tsv` |
 | filters | `python3 seed_eval.py filters --reads GAM --submit` | one job for all conditions: `results/<reads>/filter_summary.tsv`, `minimizer_summary.tsv` (+ per-condition copies in `density/`) |
-| collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
+| collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `mcnemar.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
 | fingerprint | `python3 seed_eval.py fingerprint --reads GAM [--run-tag TAG] --submit` | one job per run that has a `mapped.gam` (`<name>/rep*`, or `<name>/TAG/rep*`): `fingerprint.tsv` in the run directory |
 | determinism | `python3 seed_eval.py determinism --reads GAM --run-tag TAG` | runs locally: `results/<reads>/determinism/summary.tsv`, `reads.tsv` |
 
@@ -210,21 +210,41 @@ To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nod
 
 ### Plots
 
-`comparison.png` has one bar per condition: mismapped reads as % of eligible with a
-95% Wilson interval, mapping speed, and seeds per read on the same read set (solid
-bar: median, light bar: mean). Conditions are grouped by method (`label`), densest
-first within a method, with the `reference` group last; each method has its own
-color and the reference is gray. With more than 6 conditions the bars carry no value
-labels. If the read set has no replicates, the speed panel is titled "single run, not
-for comparison". Seed columns are only filled from a density run on the same read
-set; without one they are `NA`, and if no condition has one the seeds panel is left out.
+`comparison.png` has one bar per condition: mismapped reads as % of reads with a truth
+position on CHM13 (`eligible`), mapping speed, and seed hits per read (graph positions)
+on the same read set (solid bar: median, light bar: mean). There are no error bars on
+accuracy: every condition maps the same reads, so differences are judged with the
+paired test in `mcnemar.tsv`. With at most 6 conditions each bar is labelled
+`wrong/eligible` and, for non-reference conditions, the difference in mismapped reads
+against the reference with its Bonferroni-corrected p, e.g. `−12 wrong vs ref (p=1)`
+(negative: fewer mismapped reads than the reference); with more conditions the bars
+carry no labels. Conditions are grouped by method (`label`), densest first within a
+method, with the `reference` group last; each method has its own color and the
+reference is gray. If the read set has no replicates, the speed panel is titled
+"single run, not for comparison". Seed columns are only filled from a density run on
+the same read set; without one they are `NA`, and if no condition has one the seeds
+panel is left out.
 
 `density_sweep.png` is drawn only when the read set has results at two or more
 density groups. Its x axis is the measured density on reads (`density_reads`); the
-three panels show mismapped reads (% of eligible, 95% Wilson interval), seeds per read
-(mean solid, median dashed) and giraffe memory. Each method is one line and reference
-conditions are gray points. In the error panel the methods are shifted slightly apart
-along x so their intervals do not overlap; the shift is for display only.
+three panels show mismapped reads (% of reads with a truth position on CHM13), seed
+hits per read (mean solid, median dashed) and giraffe memory. Each method is one line
+and reference conditions are gray points.
+
+### mcnemar.tsv (paired accuracy comparison)
+
+`collect` compares conditions read by read on the same eligible reads, using each
+condition's `rep1/compare.tsv` (or its single run). Tested pairs: every condition
+against the `reference` group, and within each density group every other method
+against the `minimizer` label. Only discordant reads matter: `only_condition_correct`
+(b) and `only_against_correct` (c). `p_exact` is the two-sided exact McNemar test
+(b ~ Binomial(b + c, 1/2) if the two conditions are equally accurate);
+`p_bonferroni = min(1, p_exact × m_tests)`, with `m_tests` the number of tests in this
+read set's table. `net_reads = b − c` (positive: the condition gets more reads right
+than `against`), `net_percent` is the same as % of `eligible_both`.
+`wrong_condition` and `wrong_against` are the mismapped counts on the shared reads.
+`collect` stops if a condition's `compare.tsv` and `results.tsv` disagree on the number
+of mismapped reads.
 
 ### Filter summaries
 

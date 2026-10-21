@@ -531,7 +531,8 @@ RESULT_COLUMNS = [
 ]
 
 
-SNAPSHOT_FILES = ["results.tsv", "comparison.png", "density_sweep.png", "filter_summary.tsv", "minimizer_summary.tsv"]
+SNAPSHOT_FILES = ["results.tsv", "mcnemar.tsv", "comparison.png", "density_sweep.png",
+                  "filter_summary.tsv", "minimizer_summary.tsv"]
 
 
 def grep_first(path, pattern, cast=float):
@@ -653,17 +654,71 @@ def format_value(value):
     return str(value)
 
 
-def wilson_interval(successes, n, z=1.96):
-    """95% Wilson score interval for a binomial proportion."""
-    p = successes / n
-    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
-    return centre - half, centre + half
+REFERENCE_GROUP = "reference"  # density_group of the condition every other one is tested against
+BASELINE_LABEL = "minimizer"  # within a density group, the other methods are tested against this label
+MCNEMAR_COLUMNS = ["family", "condition", "against", "eligible_both", "wrong_condition", "wrong_against",
+                   "only_condition_correct", "only_against_correct", "net_reads", "net_percent",
+                   "p_exact", "m_tests", "p_bonferroni"]
+
+
+def mcnemar_exact(b, c):
+    """Two-sided exact McNemar p-value: if both conditions are equally accurate, b ~ Binomial(b + c, 1/2)."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, i) for i in range(min(b, c) + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def primary_compare(c, reads_set):
+    """compare.tsv of the run accuracy is read from: rep1 when the condition has replicates, else the single run."""
+    o = DATA_DIR / "results" / reads_set / c["name"]
+    return o / "rep1" / "compare.tsv" if (o / "rep1" / "compare.tsv").is_file() else o / "compare.tsv"
+
+
+def mcnemar_table(rows, reads_set):
+    """Paired exact McNemar tests on per-read correctness: every condition against the reference group, and
+    every other method against BASELINE_LABEL within each density group. Bonferroni over all tests of this
+    read set. net_reads = only_condition_correct - only_against_correct (positive: condition is better)."""
+    pairs = []
+    reference = [r for r in rows if r["density_group"] == REFERENCE_GROUP]
+    if reference:
+        pairs += [("vs_reference", r, reference[0]) for r in rows if r["density_group"] != REFERENCE_GROUP]
+    for group in dict.fromkeys(r["density_group"] for r in rows if r["density_group"] != REFERENCE_GROUP):
+        members = [r for r in rows if r["density_group"] == group]
+        for base in [r for r in members if r["label"] == BASELINE_LABEL][:1]:
+            pairs += [(f"within_{group}", r, base) for r in members if r is not base]
+    per_read = {}
+    for r in rows:
+        per_read[r["name"]] = read_compare(primary_compare(r, reads_set))
+        wrong = sum(1 for eligible, correct, mq in per_read[r["name"]].values() if eligible and not correct)
+        if wrong != r["wrong"]:
+            sys.exit(f"{r['name']}: compare.tsv has {wrong} wrong reads but results.tsv has {r['wrong']}")
+    tests = []
+    for family, a, b in pairs:
+        A, B = per_read[a["name"]], per_read[b["name"]]
+        shared = [read for read, (eligible, correct, mq) in A.items() if eligible and read in B and B[read][0]]
+        only_a = sum(1 for read in shared if A[read][1] and not B[read][1])
+        only_b = sum(1 for read in shared if B[read][1] and not A[read][1])
+        tests.append({"family": family, "condition": a["name"], "against": b["name"], "eligible_both": len(shared),
+                      "wrong_condition": sum(1 for read in shared if not A[read][1]),
+                      "wrong_against": sum(1 for read in shared if not B[read][1]),
+                      "only_condition_correct": only_a, "only_against_correct": only_b,
+                      "net_reads": only_a - only_b, "net_percent": 100 * (only_a - only_b) / len(shared),
+                      "p_exact": mcnemar_exact(only_a, only_b)})
+    for t in tests:
+        t["m_tests"] = len(tests)
+        t["p_bonferroni"] = min(1.0, t["p_exact"] * len(tests))
+    return tests
+
+
+def signed(n):
+    """+3, −5 (true minus sign) or ±0 for plot labels."""
+    return "±0" if n == 0 else (f"+{n}" if n > 0 else f"−{-n}")
 
 
 METHOD_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]  # categorical slots 1-3 of the reference palette
 REFERENCE_COLOR = "#8a8984"
-REFERENCE_GROUP = "reference"
 MAX_LABELLED_CONDITIONS = 6  # above this, bars carry no value labels
 
 
@@ -705,7 +760,7 @@ def plot_order(rows, colors):
                                        method_rank.get(r["label"], len(method_rank)), -nominal_density(r)))
 
 
-def plot_comparison(rows, path, reads_set):
+def plot_comparison(rows, path, reads_set, tests=()):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -726,18 +781,26 @@ def plot_comparison(rows, path, reads_set):
     fig, axes = plt.subplots(1, panels, figsize=(panels * max(5, 0.55 * len(rows) + 1.5), 5.2))
     ax_err, ax_speed = axes[0], axes[1]
     error = [100 * r["wrong"] / r["eligible"] for r in rows]
-    bounds = [wilson_interval(r["wrong"], r["eligible"]) for r in rows]
-    yerr = [[e - 100 * lo for e, (lo, hi) in zip(error, bounds)],
-            [100 * hi - e for e, (lo, hi) in zip(error, bounds)]]
     ax_err.bar(x, error, color=colors, width=0.6)
-    ax_err.errorbar(x, error, yerr=yerr, fmt="none", ecolor=muted, elinewidth=1.5, capsize=4)
+    # No error bars: conditions map the same reads, so differences are judged by the paired test.
+    vs_reference = {t["condition"]: t for t in tests if t["family"] == "vs_reference"}
     for i, r in zip(x, rows):
         if labelled:
-            ax_err.annotate(f"{r['wrong']}/{r['eligible']}", (i, 100 * bounds[i][1]), xytext=(0, 4),
-                            textcoords="offset points", ha="center", fontsize=9, color=ink)
-    ax_err.set_title("Mismapped reads (% of eligible, 95% CI)", fontsize=11, color=ink, loc="left")
-    # Leave room above the tallest CI whisker for its count label.
-    ax_err.set_ylim(0, 1.2 * max(100 * hi for lo, hi in bounds))
+            label = f"{r['wrong']}/{r['eligible']}"
+            t = vs_reference.get(r["name"])
+            if t:
+                label += f"\n{signed(t['wrong_condition'] - t['wrong_against'])} wrong vs ref\n(p={t['p_bonferroni']:.2g})"
+            ax_err.annotate(label, (i, error[i]), xytext=(0, 4), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=8, color=ink)
+    title = "Mismapped reads\n(% of reads with a truth position on CHM13)"
+    if vs_reference and labelled:
+        reference = next(iter(vs_reference.values()))
+        title += (f"\nref = {reference['against']}; p: paired exact McNemar,\n"
+                  f"Bonferroni over {reference['m_tests']} tests")
+    elif tests:
+        title += "\npaired tests: see mcnemar.tsv"
+    ax_err.set_title(title, fontsize=10, color=ink, loc="left")
+    ax_err.set_ylim(0, max(error) * (1.6 if labelled else 1.15))
 
     speed = [r["reads_per_sec_per_thread"] or 0 for r in rows]
     ax_speed.bar(x, speed, color=colors, width=0.6)
@@ -767,7 +830,7 @@ def plot_comparison(rows, path, reads_set):
                                       ha="center", fontsize=7, color=ink)
         top = max(r.get("seeds_per_read_mean") or 0 for r in rows)
         ax_seeds.set_ylim(0, 1.15 * top if top > 0 else 1)
-        ax_seeds.set_title(f"Seeds per read on {reads_set}\n(solid: median, light: mean)",
+        ax_seeds.set_title(f"Seed hits per read (graph positions)\non {reads_set} (solid: median, light: mean)",
                            fontsize=11, color=ink, loc="left")
 
     for ax in axes:
@@ -804,15 +867,11 @@ def plot_density_sweep(rows, path, reads_set):
     point = dict(marker="o", ms=7, markeredgecolor="#fcfcfb", markeredgewidth=1.5)
 
     fig, (ax_err, ax_seeds, ax_mem) = plt.subplots(1, 3, figsize=(16, 5.2))
-    for index, (label, color, members) in enumerate(series):
-        # Methods sit at nearly the same density, so nudge their error bars apart (display only).
-        dodge = (index - (len(method_color) - 1) / 2) * 0.0025 if index < len(method_color) else 0.0
-        xs = [r["density_reads"] + dodge for r in members]
+    top_error = 0.0
+    for label, color, members in series:
         error = [100 * r["wrong"] / r["eligible"] for r in members]
-        bounds = [wilson_interval(r["wrong"], r["eligible"]) for r in members]
-        ax_err.errorbar(xs, error, yerr=[[e - 100 * lo for e, (lo, hi) in zip(error, bounds)],
-                                         [100 * hi - e for e, (lo, hi) in zip(error, bounds)]],
-                        color=color, ecolor=color, lw=2, elinewidth=1.2, capsize=3, label=label, **point)
+        top_error = max([top_error] + error)
+        ax_err.plot([r["density_reads"] for r in members], error, color=color, lw=2, label=label, **point)
         seeds = [m for m in members if m.get("seeds_per_read_mean") is not None]
         ax_seeds.plot([m["density_reads"] for m in seeds], [m["seeds_per_read_mean"] for m in seeds],
                       color=color, lw=2, **point)
@@ -821,14 +880,15 @@ def plot_density_sweep(rows, path, reads_set):
         mem = [m for m in members if m.get("giraffe_mem_gb") is not None]
         ax_mem.plot([m["density_reads"] for m in mem], [m["giraffe_mem_gb"] for m in mem], color=color, lw=2, **point)
 
-    titles = ["Mismapped reads (% of eligible, 95% CI)",
-              f"Seeds per read on {reads_set}\n(solid: mean, dashed: median)",
+    titles = ["Mismapped reads\n(% of reads with a truth position on CHM13)",
+              f"Seed hits per read (graph positions)\non {reads_set} (solid: mean, dashed: median)",
               "Giraffe memory (GB)"]
     for ax, title in zip((ax_err, ax_seeds, ax_mem), titles):
         ax.set_title(title, fontsize=11, color=ink, loc="left")
         ax.set_xlabel("Measured seed density on reads (seeds / bp)", color=muted)
         ax.set_ylim(bottom=0)
         style_axes(ax)
+    ax_err.set_ylim(0, 1.15 * top_error)  # keep the highest point (often the reference) off the frame
     handles, labels = ax_err.get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper right", ncol=len(labels), frameon=False, fontsize=9, labelcolor=ink)
     fig.suptitle(reads_set, fontsize=10, color=muted, x=0.01, ha="left")
@@ -863,9 +923,11 @@ def collect(conditions, reads, snapshot=False):
     inconsistent = [r["name"] for r in rows if r.get("reps_consistent") == "no"]
     if inconsistent:
         print(f"WARNING: replicates disagree on the number of correct reads: {inconsistent}")
+    tests = mcnemar_table(rows, reads_set) if rows else []
+    write_table(out_dir / "mcnemar.tsv", MCNEMAR_COLUMNS, tests)
     if rows:
         plot = out_dir / "comparison.png"
-        plot_comparison(rows, plot, reads_set)
+        plot_comparison(rows, plot, reads_set, tests)
         print(f"wrote {plot}")
         sweep = out_dir / "density_sweep.png"
         if plot_density_sweep(rows, sweep, reads_set):
