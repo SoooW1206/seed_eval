@@ -1,0 +1,6 @@
+family	condition	against	eligible_both	wrong_condition	wrong_against	only_condition_correct	only_against_correct	net_reads	net_percent	p_exact	m_tests	p_bonferroni
+vs_reference	mini_k31w20	default_k31w50W	935239	6640	6575	801	866	-65	-0.0069501	0.116967	5	0.584837
+vs_reference	sync_k31s11	default_k31w50W	935239	6638	6575	795	858	-63	-0.00673625	0.127246	5	0.636232
+vs_reference	miniW_k31w20	default_k31w50W	935239	6600	6575	814	839	-25	-0.00267311	0.555001	5	1
+within_2/21	sync_k31s11	mini_k31w20	935239	6638	6640	748	746	2	0.000213849	0.979361	5	1
+within_2/21	miniW_k31w20	mini_k31w20	935239	6600	6640	253	213	40	0.00427698	0.0707042	5	0.353521
