@@ -338,6 +338,31 @@ python3 -I prototype/compare_with_vg.py OUT_DIR/per_read_constant.tsv \
     data_dir/results/<reads>/<condition>/density/per_read.tsv OUT_DIR/per_read_counted.tsv --out comparison.tsv
 ```
 
+### Count table (`prototype/minimax_counts.cpp`)
+
+The counts minimaxmer selection needs, for every canonical k-mer in the graph:
+`genome_count` = number of distinct graph positions over all haplotypes (the count
+`vg minimizer --threshold` uses for weighted minimizers, and the graph analogue of
+Yoshi's occurrences in the genome), and `reads_count` = the k-mer's count in a KFF file
+(KMC on the sample's reads; 0 if absent). Both saturate at 65535; canonical means the
+smaller 2-bit key of the two strands, as in gbwtgraph. Build it against the vg tree
+(command in its header) and run:
+
+```bash
+minimax_counts -g GRAPH.gbz -f READS.kff -o PREFIX -c COVERAGE -t THREADS
+```
+
+It writes `PREFIX.mmc` (24-byte header `MMXCNT01`, k, n; then n sorted 64-bit keys and n
+32-bit values `genome_count << 16 | reads_count`, little-endian), `PREFIX.summary.tsv`
+(first: distinct graph k-mers, fraction with `genome_count` 1, the `reads_count` peak
+among `genome_count` 1 k-mers with `reads_count` ≥ 5 and its ratio to `COVERAGE`, and the
+counts file size), and histograms of each count plus a joint table (numbers only).
+The k of the KFF sets k. For the reads, count with
+`kmc -k31 -ci2 -cs65535 -okff` (16-bit counts like Yoshi's; k-mers seen once dropped).
+`prototype/test_minimax_counts.py` checks the output on a small graph against a brute
+force over the haplotype walks (genome counts) and a `kmc_dump` of the same reads
+(reads counts), and reads the counts file back.
+
 ## Safeguards
 
 - **Index provenance.** Each index job writes `indexes/<name>.params` (vg binary and
@@ -357,6 +382,12 @@ python3 -I prototype/compare_with_vg.py OUT_DIR/per_read_constant.tsv \
   sweep keeps the preset fixed; these are command-line options and could be varied
   through `giraffe_args`.
 - Small read sets give few errors; use 100k+ reads to compare accuracy.
+- **The `hifi` preset turns giraffe's explored MAPQ cap off** (`explored-cap false` in
+  vg's `giraffe_main.cpp`). That cap is the only place giraffe treats a minimizer's
+  hash as a uniform random number (`get_prob_of_disruption_in_column`), so a scheme that
+  changes the hash values (weighted minimizers, the planned minimaxmers) breaks no
+  assumption of giraffe's MAPQ under `-b hifi`; with presets that use the cap, that
+  MAPQ cap would be computed from non-uniform hashes.
 - **Mapping was deterministic in our test** (`results_summary/HG002-sim-hifi-100k/determinism_summary.tsv`):
   for `sync_k31s11` and `default_k31w50W` on the 100k set, three runs plus one run five
   days earlier gave identical fingerprints for all 100,000 reads. Scope: 2 conditions,
