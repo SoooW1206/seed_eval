@@ -363,6 +363,21 @@ The k of the KFF sets k. For the reads, count with
 force over the haplotype walks (genome counts) and a `kmc_dump` of the same reads
 (reads counts), and reads the counts file back.
 
+`results_summary/HG002Revio_full_k31_counts/` holds the outputs for our graph and the full
+HG002 Revio HiFi reads (12.8 M reads, 66x haploid coverage), without the 31.8 GB counts
+file itself. They were made with
+`kmc -k31 -m128 -ci2 -cs65535 -okff -t16 -hp READS.fastq.gz OUT TMP` and
+`minimax_counts -g GRAPH.gbz -f OUT.kff -o PREFIX -c 66.0 -t 32`:
+
+| File | Contents |
+|---|---|
+| `summary.tsv` | `minimax_counts` summary (headline numbers first) |
+| `genome_hist.tsv` | number of graph k-mers per `genome_count` |
+| `reads_hist.tsv` | number of graph k-mers per `reads_count` (all graph k-mers) |
+| `joint.tsv` | graph k-mers by binned `genome_count` × binned `reads_count` |
+| `reads_hist_genome1.tsv` | `reads_count` histogram of the k-mers with `genome_count` 1, from `python3 -I prototype/plot_reads_count.py hist PREFIX.mmc OUT.tsv` |
+| `reads_count_genome1.png` | that histogram, with the coverage and half of it marked: `python3 -I prototype/plot_reads_count.py plot reads_hist_genome1.tsv OUT.png --coverage 66` |
+
 ## Safeguards
 
 - **Index provenance.** Each index job writes `indexes/<name>.params` (vg binary and

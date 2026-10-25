@@ -1,0 +1,17 @@
+metric	value
+distinct_graph_kmers	2648502931
+genome_count_1_fraction	0.958538
+reads_count_peak (genome_count 1, reads_count >= 5)	68
+reads_count_peak / coverage 66	1.0303
+counts_file_bytes	31782035196
+k	31
+genome_count_saturated	35
+reads_count_0_fraction	0.0253953
+reads_count_saturated	59713
+kff_kmers	3193303888
+kff_kmers_in_graph	2581243315
+kff_kmers_not_in_graph	612060573
+kff_occurrences	193592536675
+kff_occurrences_in_graph	191305953165
+seconds	2242.22
+peak_rss_gib	162.986
