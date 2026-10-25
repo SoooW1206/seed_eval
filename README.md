@@ -143,7 +143,8 @@ the `sbatch` command line; the generated scripts do not change.
 
 | Stage | Command | Output |
 |---|---|---|
-| index | `python3 seed_eval.py index [--force] --submit` | `indexes/<name>.min`, `.zipcodes`, `.params`; skipped if already built with the same parameters |
+| index | `python3 seed_eval.py index [--force] --submit` | `indexes/<name>.min`, `.zipcodes`, `.params`, `.vg_sha256` (and `.counts_sha256` with minimaxmer counts); skipped if already built with the same parameters |
+| checksums | `python3 seed_eval.py checksums [--only NAME ...] [--force]` | runs locally: writes missing `.vg_sha256` / `.counts_sha256` records for indexes built before they existed |
 | map | `python3 seed_eval.py map --reads GAM [--reps N] --submit` | `results/<reads>/<name>/`: `mapped.gam`, `annot.gam`, `compare.tsv`, `gamcompare.txt`, `giraffe.log`, `stats.txt`, `*.time`, `report.tsv`, `run_info.tsv` |
 | density | `python3 seed_eval.py density --reads GAM --submit` | `results/<reads>/<name>/density/`: `prov.gam`, `per_read.tsv`, `density_summary.tsv` |
 | filters | `python3 seed_eval.py filters --reads GAM --submit` | one job for all conditions: `results/<reads>/filter_summary.tsv`, `minimizer_summary.tsv` (+ per-condition copies in `density/`) |
@@ -385,6 +386,17 @@ file itself. They were made with
   refuse to generate scripts, and the jobs refuse to start, if it disagrees with the
   row. `index` deletes the old `.params` before rebuilding, so a half-built index is
   never used.
+- **Program and counts checksums.** `vg_minimax` reports the same `vg version` as
+  `vg_baseline`, so the version line cannot tell them apart. Each index job also
+  writes `indexes/<name>.vg_sha256` (path, size and sha256 of the vg binary) and, for a
+  row whose `index_args` has `--minimaxmer-counts FILE`, `indexes/<name>.counts_sha256`
+  for that counts file. These are separate files so that `.params`, which queued jobs
+  compare word for word, never changes. `map`, `density` and `timing` refuse to
+  generate scripts without them, and the jobs recompute the sha256 before mapping and
+  stop if the binary or counts file is not the recorded one. For indexes built before
+  these records existed, `python3 seed_eval.py checksums [--only NAME ...]` writes
+  them, but only for files last modified before the index's `.params` was written
+  (otherwise rebuild the index); it keeps existing records unless `--force`.
 - **Atomic outputs.** Every file is written as `.tmp` and renamed when complete.
 - **Run provenance.** Map and density jobs record commit, date, node, job id and
   giraffe arguments in `run_info.tsv`. Commit before submitting so the commit is not `-dirty`.

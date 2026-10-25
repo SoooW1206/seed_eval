@@ -51,6 +51,7 @@ import argparse
 import collections
 import csv
 import functools
+import hashlib
 import math
 import re
 import shlex
@@ -194,6 +195,10 @@ def check_index_params(c, stage, force):
         if stage == "index" and not force:
             print(f"[{c['name']}] index already built with these parameters; skipping (use --force to rebuild)")
             return False
+        missing = [str(record) for record, _, _ in checksum_files(c) if not record.is_file()]
+        if stage not in ("index", "checksums") and missing:
+            sys.exit(f"{c['name']}: no {', '.join(missing)}; record it with: "
+                     f"python3 seed_eval.py checksums --only {c['name']}")
         return True
     if stage == "index":
         if Path(f"{out}.min").exists() and not force:
@@ -214,7 +219,72 @@ def require_index(c):
 for f in {out}.min {out}.zipcodes; do
     [ -s "$f" ] || {{ echo "missing index file $f; run the index stage first" >&2; exit 1; }}
 done
-"""
+""" + require_checksums(c)
+
+
+COUNTS_OPTION = "--minimaxmer-counts"
+
+
+def counts_path(c):
+    """The minimaxmer counts file named in index_args, or None."""
+    match = re.search(rf"{COUNTS_OPTION}\s+(\S+)", c["index_args"])
+    return Path(match.group(1)) if match else None
+
+
+def checksum_files(c):
+    """(record, label, file): indexes/<name>.vg_sha256 for the vg binary, and for a minimaxmer condition
+    indexes/<name>.counts_sha256 for its counts file. A record holds <label>=<path>, bytes= and sha256=.
+    Kept apart from .params, so that adding them changes no .params that queued jobs compare against."""
+    out = index_prefix(c)
+    files = [(Path(f"{out}.vg_sha256"), "vg_binary", Path(c["vg_binary"]))]
+    if counts_path(c):
+        files.append((Path(f"{out}.counts_sha256"), "counts", counts_path(c)))
+    return files
+
+
+def write_checksums(c):
+    """Index-job lines writing the checksum records of the files the index was just built with."""
+    return "".join(f"""printf '{label}=%s\\nbytes=%s\\nsha256=%s\\n' '{path}' "$(stat -c %s {path})" \\
+    "$(sha256sum < {path} | cut -d' ' -f1)" > {record}
+""" for record, label, path in checksum_files(c))
+
+
+def require_checksums(c):
+    """Job-time check that the vg binary (and counts file) are the ones recorded when the index was built."""
+    return "".join(f"""[ -s {record} ] || {{
+    echo "missing {record}; record it with: python3 seed_eval.py checksums --only {c['name']}" >&2; exit 1; }}
+[ "$(sed -n 's/^{label}=//p' {record})" = "{path}" ] && \\
+    [ "$(sha256sum < {path} | cut -d' ' -f1)" = "$(sed -n 's/^sha256=//p' {record})" ] || {{
+    echo "{path} is not the {label} recorded in {record}" >&2; exit 1; }}
+""" for record, label, path in checksum_files(c))
+
+
+@functools.lru_cache(maxsize=None)
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 24), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def record_checksums(conditions, force):
+    """checksums stage: write missing checksum records for indexes that are already built. A file is only
+    recorded if it was last modified before the index's .params was written, i.e. the index was built with
+    this very file; otherwise the index has to be rebuilt."""
+    for c in conditions:
+        params = Path(f"{index_prefix(c)}.params")
+        if not params.is_file() or params.read_text() != index_params(c):
+            print(f"[{c['name']}] no matching {params}; skipped (the index stage writes the records)")
+            continue
+        for record, label, path in checksum_files(c):
+            if record.is_file() and not force:
+                print(f"[{c['name']}] {record} exists; kept (use --force to rewrite)")
+                continue
+            if path.stat().st_mtime >= params.stat().st_mtime:
+                sys.exit(f"{c['name']}: {path} changed after {params} was written; rebuild the index instead")
+            record.write_text(f"{label}={path}\nbytes={path.stat().st_size}\nsha256={sha256_file(path)}\n")
+            print(f"[{c['name']}] wrote {record}")
 
 
 def run_info(c, o):
@@ -236,14 +306,14 @@ def index_script(c, reads):
     log = DATA_DIR / "logs" / f"index_{c['name']}.%j.log"
     return sbatch_header(f"idx-{c['name']}", c["index_mem"], INDEX_TIME, log) + f"""mkdir -p {out.parent}
 # Until the new .params is written, map/density treat this index as not built.
-rm -f {out}.params
+rm -f {out}.params {' '.join(str(record) for record, _, _ in checksum_files(c))}
 /usr/bin/time -v {c['vg_binary']} minimizer {c['index_args']} -p -t {THREADS} \\
     -d {DIST} -o {out}.min.tmp -z {out}.zipcodes.tmp {GBZ}
 mv {out}.min.tmp {out}.min
 mv {out}.zipcodes.tmp {out}.zipcodes
 echo "min size (bytes): $(stat -c %s {out}.min)"
 echo "zipcodes size (bytes): $(stat -c %s {out}.zipcodes)"
-cat > {out}.params <<'PARAMS'
+{write_checksums(c)}cat > {out}.params <<'PARAMS'
 {index_params(c)}PARAMS
 """
 
@@ -405,7 +475,7 @@ def timing_script(conditions, reads, real=False, variant=""):
     real_fields = ("" if not real else
                    " \\\n        \"$(awk '/Maximum resident/ {printf \"%.2f\", $NF / 1048576}' $D/giraffe.time)\""
                    " \"$(tail -n 1 $D/real_stats.tsv)\"")
-    # A full real-read GAM is ~90 GB: delete it on any exit, including errors and Slurm's SIGTERM; logs stay.
+    # A full real-read GAM is ~166 GB: delete it on any exit, including errors and Slurm's SIGTERM; logs stay.
     cleanup = "" if not real else """D=
 trap '[ -z "$D" ] || rm -f "$D/mapped.gam"' EXIT
 trap 'exit 143' TERM
@@ -1210,14 +1280,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("stage", choices=sorted(STAGES) + ["prepare", "filters", "collect", "fingerprint", "determinism",
-                                                           "timing"])
+                                                           "timing", "checksums"])
     parser.add_argument("--config", default=str(DEFAULT_CONFIG),
                         help="tab-separated paths: data_dir, graph, reads_dir, vg (default: config.tsv in this repo)")
     parser.add_argument("--conditions", default="conditions.tsv")
     parser.add_argument("--reads", help=f"truth GAM for map/density (default: reads_dir/{DEFAULT_READS_NAME})")
     parser.add_argument("--only", nargs="*", help="run only these condition names")
     parser.add_argument("--submit", action="store_true", help="sbatch the generated scripts")
-    parser.add_argument("--force", action="store_true", help="index: rebuild even if already built")
+    parser.add_argument("--force", action="store_true",
+                        help="index: rebuild even if already built; checksums: rewrite existing records")
     parser.add_argument("--reps", type=int, default=1, help="map: number of replicate runs (default 1)")
     parser.add_argument("--run-tag", help="map/fingerprint/determinism: runs live in <name>/<run-tag>/ "
                                           "(apart from the default runs)")
@@ -1265,6 +1336,9 @@ def main():
 
     if args.stage == "collect":
         collect(conditions, args.reads, args.snapshot)
+        return
+    if args.stage == "checksums":
+        record_checksums(conditions, args.force)
         return
     if args.stage == "filters":
         for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
