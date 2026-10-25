@@ -150,6 +150,7 @@ the `sbatch` command line; the generated scripts do not change.
 | collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `mcnemar.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
 | fingerprint | `python3 seed_eval.py fingerprint --reads GAM [--run-tag TAG] --submit` | one job per run that has a `mapped.gam` (`<name>/rep*`, or `<name>/TAG/rep*`): `fingerprint.tsv` in the run directory |
 | determinism | `python3 seed_eval.py determinism --reads GAM --run-tag TAG` | runs locally: `results/<reads>/determinism/summary.tsv`, `reads.tsv` |
+| timing | `python3 seed_eval.py timing --reads GAM --only A B C REF --submit` | one exclusive job, submitted twice: `results/<reads>/timing/job<ID>/runs.tsv`, `run_info.tsv`, per run `round<r>_<name>/giraffe.log`, `giraffe.time` |
 
 What each job runs:
 
@@ -178,6 +179,16 @@ What each job runs:
   `mapped_flip`; `correct_flip` counts reads whose gamcompare verdict differs between
   runs. `summary.tsv` has one row per comparison; `reads.tsv` lists only reads that
   differ, one row per run, with the node it ran on.
+- **timing**: speed on fixed hardware. One job reserves a whole node (`--exclusive`,
+  `--exclude=<exclude_nodes>` written into the script) and runs only giraffe (16
+  threads) for the `--only` conditions, 3 rounds, reloading the indexes every run.
+  Each round starts one place further along the `--only` order (A B C REF, then
+  B C REF A, then C REF A B), so no condition is always first or last. Each GAM is
+  deleted once written. After every run a row is appended to `runs.tsv`: job, node,
+  round, order, condition, `load_seconds`, `map_seconds`, `reads_per_sec_per_thread`,
+  `reads_per_cpu_second`, `cpu_seconds`, `memory_gb` (all from `giraffe.log`).
+  `--submit` submits the same script twice; two jobs running at the same time are on
+  different nodes, one queued behind the other may land on the same node (see `node`).
 
 Typical order: index → for each read set: map and density → filters → collect.
 To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nodes`
@@ -207,6 +218,17 @@ To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nod
 | `seeds_per_read_median`, `seeds_per_read_mean`, `seeds_per_read_p90` | seeds per read (`stage.seed.results`, graph hits of the kept minimizers): median, mean and nearest-rank 90th percentile |
 | `kept_minimizers_per_read` | minimizers left after giraffe's filters, per read |
 | `mean_hits_per_kept_minimizer` | `stage.seed.results / kept minimizers`: how many graph hits each kept minimizer has on average |
+| `timed_jobs` | number of `timing` jobs this condition ran in (`NA` without a timing run) |
+| `timed_speed_median` | median over timing jobs of the per-job median speed (reads/s/thread); descriptive only, since nodes differ |
+| `timed_ratio_min`, `timed_ratio_max` | range over timing jobs of the speed ratio against the `reference` condition **in the same job** |
+
+### timing.tsv (fixed-hardware speed, written when timing runs exist)
+
+One row per condition and timing job: `node`, `runs`, `speed_median`/`speed_min`/`speed_max`
+(reads/s/thread), `ratio_vs_ref` (this median ÷ the reference condition's median in the
+same job), and medians of reads per CPU-second, load seconds and map seconds, plus the
+largest giraffe memory footprint. Runs that did not finish are left out. Compare speeds
+within a job; `--snapshot` copies this file too.
 
 ### Plots
 
@@ -257,6 +279,7 @@ items passing and failing; the `minimizer` stage filters act on minimizers.
 
 Mapping speed depends on how busy the compute node is, so it can vary between runs.
 Use replicates (`--reps`) on a large read set and treat small differences with caution.
+For comparisons, use the `timing` stage, which keeps all conditions on one reserved node per job.
 
 ## Minimaxmer prototype (`prototype/`)
 

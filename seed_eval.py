@@ -48,6 +48,7 @@ condition's row, so a row whose index_args changed without a new name cannot
 silently reuse an old index.
 """
 import argparse
+import collections
 import csv
 import functools
 import math
@@ -76,6 +77,9 @@ COMPARE_RANGE = 200  # bp window for gamcompare to call a read correct
 MAP_MEM = "64G"  # measured on 1k reads: giraffe footprint ~41 GB, job peak ~36 GiB
 MAP_TIME = "02:00:00"
 INDEX_TIME = "12:00:00"
+TIMING_ROUNDS = 3  # timing: each job maps every condition this many times, interleaved
+TIMING_JOBS = 2  # timing: identical exclusive jobs submitted, ideally landing on different nodes
+TIMING_TIME = "04:00:00"  # 12 runs of ~8 min on 100k reads
 
 REQUIRED_COLUMNS = ["name", "vg_binary", "index_args", "index_mem"]
 OPTIONAL_COLUMNS = ["giraffe_args", "map_mem", "density_group", "label"]
@@ -131,7 +135,7 @@ def validate(conditions, path):
         sys.exit(f"{path}: duplicate condition names {duplicates}")
 
 
-def sbatch_header(job_name, mem, time, log, partition=PARTITION, cpus=THREADS):
+def sbatch_header(job_name, mem, time, log, partition=PARTITION, cpus=THREADS, extra=""):
     return f"""#!/bin/bash
 #SBATCH --job-name={job_name}
 #SBATCH --partition={partition}
@@ -139,7 +143,7 @@ def sbatch_header(job_name, mem, time, log, partition=PARTITION, cpus=THREADS):
 #SBATCH --mem={mem}
 #SBATCH --time={time}
 #SBATCH --output={log}
-set -euo pipefail
+{extra}set -euo pipefail
 """
 
 
@@ -276,6 +280,56 @@ mv $O/compare.tsv.tmp $O/compare.tsv
 mv $O/stats.txt.tmp $O/stats.txt
 """ + cleanup + run_info(c, o) + """cat $O/gamcompare.txt
 """
+
+
+TIMING_COLUMNS = ["job_id", "node", "round", "order", "condition", "load_seconds", "map_seconds",
+                  "reads_per_sec_per_thread", "reads_per_cpu_second", "cpu_seconds", "memory_gb"]
+
+
+def timing_script(conditions, reads):
+    """One exclusive job that maps the conditions TIMING_ROUNDS times over, reloading the indexes every run.
+    Round r starts r-1 places further along the given order, so no condition is always first or last.
+    Only Giraffe runs; each GAM is deleted once written. Speeds are compared within a job."""
+    reads_set = Path(reads).stem
+    t = DATA_DIR / "results" / reads_set / "timing" / "job$SLURM_JOB_ID"
+    log = DATA_DIR / "logs" / f"timing_{reads_set}.%j.log"
+    mem = f"{max(int(map_mem(c).rstrip('G')) for c in conditions)}G"
+    pinned = f"#SBATCH --exclusive\n#SBATCH --exclude={EXCLUDE_NODES}\n"
+    header = "\\t".join(TIMING_COLUMNS)
+    text = sbatch_header(f"timing-{reads_set}", mem, TIMING_TIME, log, extra=pinned)
+    text += "".join(require_index(c) for c in conditions) + f"""T={t}
+mkdir -p $T
+NODE=$(hostname -s)
+printf 'git_commit\\trun_date\\thost\\tjob_id\\n%s\\t%s\\t%s\\t%s\\n' \\
+    '{git_commit()}' "$(date -Iseconds)" "$NODE" "$SLURM_JOB_ID" > $T/run_info.tsv
+printf '{header}\\n' > $T/runs.tsv
+# Append one row to runs.tsv from the giraffe.log in $D. Arguments: round, order, condition.
+record() {{
+    L=$D/giraffe.log
+    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$SLURM_JOB_ID" "$NODE" "$1" "$2" "$3" \\
+        "$(sed -n 's/.*Loading and initialization: \\([0-9.]*\\) seconds.*/\\1/p' $L)" \\
+        "$(sed -n 's/.*Mapped [0-9]* reads across [0-9]* threads in \\([0-9.]*\\) seconds.*/\\1/p' $L)" \\
+        "$(sed -n 's/.*Mapping speed: \\([0-9.]*\\) reads per second per thread.*/\\1/p' $L)" \\
+        "$(sed -n 's/.*Achieved \\([0-9.]*\\) reads per CPU-second.*/\\1/p' $L)" \\
+        "$(sed -n 's/.*Used \\([0-9.]*\\) CPU-seconds.*/\\1/p' $L)" \\
+        "$(sed -n 's/.*Memory footprint: \\([0-9.]*\\) GB.*/\\1/p' $L)" >> $T/runs.tsv
+}}
+"""
+    order = 0
+    for rnd in range(1, TIMING_ROUNDS + 1):
+        shift = (rnd - 1) % len(conditions)
+        for c in conditions[shift:] + conditions[:shift]:
+            order += 1
+            text += f"""
+# round {rnd}, run {order}: {c['name']}
+D=$T/round{rnd}_{c['name']}
+mkdir -p $D
+/usr/bin/time -v -o $D/giraffe.time {giraffe_cmd(c, reads)} \\
+    > $D/mapped.gam 2> $D/giraffe.log
+rm $D/mapped.gam
+record {rnd} {order} {c['name']}
+"""
+    return text + "cat $T/runs.tsv\n"
 
 
 def density_script(c, reads):
@@ -528,11 +582,12 @@ RESULT_COLUMNS = [
     "occurrences", "density_graph", "density_reads",
     "seeds_per_read_median", "seeds_per_read_mean", "seeds_per_read_p90",
     "kept_minimizers_per_read", "mean_hits_per_kept_minimizer",
+    "timed_jobs", "timed_speed_median", "timed_ratio_min", "timed_ratio_max",
 ]
 
 
 SNAPSHOT_FILES = ["results.tsv", "mcnemar.tsv", "comparison.png", "density_sweep.png",
-                  "filter_summary.tsv", "minimizer_summary.tsv"]
+                  "filter_summary.tsv", "minimizer_summary.tsv", "timing.tsv"]
 
 
 def grep_first(path, pattern, cast=float):
@@ -634,6 +689,40 @@ def collect_row(c, reads_set, graph_length):
         row["kept_minimizers_per_read"] = float(summary["kept_minimizers_per_read"])
         row["mean_hits_per_kept_minimizer"] = float(summary["mean_hits_per_kept_minimizer"])
     return row
+
+
+TIMING_SUMMARY_COLUMNS = ["condition", "job_id", "node", "runs", "speed_median", "speed_min", "speed_max",
+                          "ratio_vs_ref", "cpu_speed_median", "load_s_median", "map_s_median", "memory_gb_max"]
+
+
+def timing_summary(conditions, reads_set):
+    """One row per condition and timing job: medians over that job's runs, and ratio_vs_ref = this speed median
+    over the reference condition's speed median in the same job (NA if the reference did not run there)."""
+    names = [c["name"] for c in conditions]
+    reference = next((c["name"] for c in conditions if c["density_group"] == REFERENCE_GROUP), None)
+    runs = collections.defaultdict(list)
+    for path in sorted((DATA_DIR / "results" / reads_set / "timing").glob("job*/runs.tsv")):
+        with open(path, newline="") as f:
+            for r in csv.DictReader(f, delimiter="\t"):
+                if r["condition"] in names and r["reads_per_sec_per_thread"]:  # empty: run did not finish
+                    runs[r["job_id"], r["condition"]].append(r)
+    medians = {key: statistics.median(float(r["reads_per_sec_per_thread"]) for r in rs) for key, rs in runs.items()}
+    rows = []
+    for job in sorted({job for job, _ in runs}, key=int):
+        for name in names:
+            rs = runs.get((job, name))
+            if not rs:
+                continue
+            speeds = [float(r["reads_per_sec_per_thread"]) for r in rs]
+            ref = medians.get((job, reference))
+            rows.append({"condition": name, "job_id": job, "node": rs[0]["node"], "runs": len(rs),
+                         "speed_median": medians[job, name], "speed_min": min(speeds), "speed_max": max(speeds),
+                         "ratio_vs_ref": medians[job, name] / ref if ref else None,
+                         "cpu_speed_median": statistics.median(float(r["reads_per_cpu_second"]) for r in rs),
+                         "load_s_median": statistics.median(float(r["load_seconds"]) for r in rs),
+                         "map_s_median": statistics.median(float(r["map_seconds"]) for r in rs),
+                         "memory_gb_max": max(float(r["memory_gb"]) for r in rs)})
+    return rows
 
 
 def seed_stats(per_read):
@@ -907,6 +996,20 @@ def collect(conditions, reads, snapshot=False):
         (rows if row.get("correct") is not None else skipped).append(row)
     out_dir = DATA_DIR / "results" / reads_set
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Fixed-hardware speed (timing stage): within each job, then summarised over jobs.
+    timing = timing_summary(conditions, reads_set)
+    for row in rows:
+        jobs = [t for t in timing if t["condition"] == row["name"]]
+        if jobs:
+            ratios = [t["ratio_vs_ref"] for t in jobs if t["ratio_vs_ref"] is not None]
+            row["timed_jobs"] = len(jobs)
+            row["timed_speed_median"] = statistics.median(t["speed_median"] for t in jobs)
+            if ratios:
+                row["timed_ratio_min"], row["timed_ratio_max"] = min(ratios), max(ratios)
+    if timing:
+        write_table(out_dir / "timing.tsv", TIMING_SUMMARY_COLUMNS, timing)
+    else:
+        (out_dir / "timing.tsv").unlink(missing_ok=True)  # never snapshot a stale timing table
     table = out_dir / "results.tsv"
     with open(table, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
@@ -959,7 +1062,8 @@ def submit(script, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("stage", choices=sorted(STAGES) + ["prepare", "filters", "collect", "fingerprint", "determinism"])
+    parser.add_argument("stage", choices=sorted(STAGES) + ["prepare", "filters", "collect", "fingerprint", "determinism",
+                                                           "timing"])
     parser.add_argument("--config", default=str(DEFAULT_CONFIG),
                         help="tab-separated paths: data_dir, graph, reads_dir, vg (default: config.tsv in this repo)")
     parser.add_argument("--conditions", default="conditions.tsv")
@@ -1021,6 +1125,22 @@ def main():
         return
     if args.stage == "determinism":
         determinism(conditions, args.reads, args.run_tag)
+        return
+    if args.stage == "timing":
+        if not args.only or not EXCLUDE_NODES:
+            sys.exit("timing needs --only (the conditions, in running order) and exclude_nodes in the config")
+        by_name = {c["name"]: c for c in conditions}
+        conditions = [by_name[name] for name in args.only]
+        for c in conditions:
+            check_index_params(c, "map", False)  # exits if the index is missing or stale
+        for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
+            directory.mkdir(parents=True, exist_ok=True)
+        script = DATA_DIR / "jobs" / f"timing_{Path(args.reads).stem}.sbatch"
+        script.write_text(timing_script(conditions, args.reads))
+        print(f"[{' -> '.join(args.only)}, rotated each round] x {TIMING_ROUNDS} rounds -> {script}")
+        if args.submit:
+            for _ in range(TIMING_JOBS):
+                submit(script, args)
         return
     if args.stage == "fingerprint":
         for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
