@@ -150,7 +150,7 @@ the `sbatch` command line; the generated scripts do not change.
 | collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `mcnemar.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
 | fingerprint | `python3 seed_eval.py fingerprint --reads GAM [--run-tag TAG] --submit` | one job per run that has a `mapped.gam` (`<name>/rep*`, or `<name>/TAG/rep*`): `fingerprint.tsv` in the run directory |
 | determinism | `python3 seed_eval.py determinism --reads GAM --run-tag TAG` | runs locally: `results/<reads>/determinism/summary.tsv`, `reads.tsv` |
-| timing | `python3 seed_eval.py timing --reads GAM --only A B C REF --submit` | one exclusive job, submitted twice: `results/<reads>/timing/job<ID>/runs.tsv`, `run_info.tsv`, per run `round<r>_<name>/giraffe.log`, `giraffe.time` |
+| timing | `python3 seed_eval.py timing --reads GAM --only A B C REF [--real] --submit` | one exclusive job, submitted twice (`--real`: two jobs in opposite orders): `results/<reads>/timing/job<ID>/runs.tsv`, `run_info.tsv`, per run `round<r>_<name>/giraffe.log`, `giraffe.time` (`--real`: also `fingerprint.tsv`, statistics, `placement.tsv`) |
 
 What each job runs:
 
@@ -189,6 +189,21 @@ What each job runs:
   `reads_per_cpu_second`, `cpu_seconds`, `memory_gb` (all from `giraffe.log`).
   `--submit` submits the same script twice; two jobs running at the same time are on
   different nodes, one queued behind the other may land on the same node (see `node`).
+- **timing --real** (`--reads` is a real-read FASTQ, mapped with `-f`; the lab's practice
+  for real-read speed is the full read set): 64 threads, partition `long`, 300000 MB,
+  30 h, one round per job; two scripts, `_order1` in the `--only` order and `_order2`
+  reversed, each submitted once. After each giraffe run and before its GAM is deleted,
+  `vg filter -T "name;is_aligned;mapping_quality;score;identity;nodes"` writes
+  `fingerprint.tsv` (per read: aligned, MAPQ, score, identity, first and last node with
+  strand, number of nodes; no bases), and `real_stats.tsv`, `mapq_hist.tsv` and
+  `identity_hist.tsv` are computed from it (MAPQ and identity over aligned reads). The job
+  stops if the fingerprint does not have exactly as many reads as giraffe reports.
+  `runs.tsv` gets the extra columns `peak_rss_gib`, `reads`, `aligned_fraction`,
+  `mapq0_fraction`, `mapq60_fraction`, `identity_mean`, `identity_median`. At the end the
+  job compares its runs read by read into `placement.tsv` (every method against the
+  `minimizer` label of its density group). Read set name: the file name without
+  `.fastq.gz`/`.fq.gz`. Real-read (64 threads) and simulated-read (16 threads) speeds are
+  reported separately and are not comparable.
 
 Typical order: index → for each read set: map and density → filters → collect.
 To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nodes`
@@ -229,6 +244,13 @@ One row per condition and timing job: `node`, `runs`, `speed_median`/`speed_min`
 same job), and medians of reads per CPU-second, load seconds and map seconds, plus the
 largest giraffe memory footprint. Runs that did not finish are left out. Compare speeds
 within a job; `--snapshot` copies this file too.
+
+`timing_runs.tsv` concatenates every job's `runs.tsv` (one row per run). For real reads,
+`placement.tsv` concatenates the jobs' placement tables: per job and pair, `reads`,
+`aligned_both`, `aligned_only_condition`, `aligned_only_against`, `different_start` (reads
+aligned by both whose first node or strand differs), and among those
+`higher_score_condition`, `higher_score_against`, `equal_score`. A real read set has no
+truth, so its `results.tsv` and `mcnemar.tsv` are empty.
 
 ### Plots
 

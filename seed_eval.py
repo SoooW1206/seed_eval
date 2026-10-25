@@ -80,6 +80,12 @@ INDEX_TIME = "12:00:00"
 TIMING_ROUNDS = 3  # timing: each job maps every condition this many times, interleaved
 TIMING_JOBS = 2  # timing: identical exclusive jobs submitted, ideally landing on different nodes
 TIMING_TIME = "04:00:00"  # 12 runs of ~8 min on 100k reads
+# timing --real (full real-read FASTQ, lab practice for real-read speed): one round per job, order reversed
+# in the second job. Threads and memory as the lab's MAPPER_THREADS and auto_mapping_memory for hifi.
+REAL_THREADS = 64
+REAL_MEM = "300000M"  # 240000 MB / 64 * threads + 60000 MB
+REAL_PARTITION = "long"
+REAL_TIME = "30:00:00"  # lab budgets 20 h for one full real-read run; ~6-10 h expected for 4
 
 REQUIRED_COLUMNS = ["name", "vg_binary", "index_args", "index_mem"]
 OPTIONAL_COLUMNS = ["giraffe_args", "map_mem", "density_group", "label"]
@@ -218,10 +224,11 @@ def run_info(c, o):
 """
 
 
-def giraffe_cmd(c, reads, extra=""):
+def giraffe_cmd(c, reads, extra="", threads=THREADS, reads_flag="-G"):
+    """reads_flag -G: truth GAM; -f: FASTQ (real reads)."""
     out = index_prefix(c)
-    return (f"{c['vg_binary']} giraffe -p -b {GIRAFFE_PRESET} -t {THREADS} {c['giraffe_args']} {extra}"
-            f" \\\n    -Z {GBZ} -d {DIST} -m {out}.min -z {out}.zipcodes -G {reads}")
+    return (f"{c['vg_binary']} giraffe -p -b {GIRAFFE_PRESET} -t {threads} {c['giraffe_args']} {extra}"
+            f" \\\n    -Z {GBZ} -d {DIST} -m {out}.min -z {out}.zipcodes {reads_flag} {reads}")
 
 
 def index_script(c, reads):
@@ -239,6 +246,15 @@ echo "zipcodes size (bytes): $(stat -c %s {out}.zipcodes)"
 cat > {out}.params <<'PARAMS'
 {index_params(c)}PARAMS
 """
+
+
+def reads_set_name(reads):
+    """Read set name: the file name without .gam, or without .fastq.gz/.fq.gz/.fastq/.fq for real reads."""
+    name = Path(reads).name
+    for ext in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        if name.endswith(ext):
+            return name[:-len(ext)]
+    return Path(reads).stem
 
 
 def results_dir(c, reads):
@@ -284,50 +300,159 @@ mv $O/stats.txt.tmp $O/stats.txt
 
 TIMING_COLUMNS = ["job_id", "node", "round", "order", "condition", "load_seconds", "map_seconds",
                   "reads_per_sec_per_thread", "reads_per_cpu_second", "cpu_seconds", "memory_gb"]
+# timing --real only: peak RSS from /usr/bin/time, the rest from real_stats.tsv (MAPQ and identity over aligned reads)
+REAL_COLUMNS = ["peak_rss_gib", "reads", "aligned_fraction", "mapq0_fraction", "mapq60_fraction",
+                "identity_mean", "identity_median"]
+# Per-read fingerprint of a real-read run from `vg filter -T` (jq on the JSON would take about a day per run):
+# start and end are the first and last node with strand, n_nodes the number of nodes on the path. No bases.
+REAL_TSV_FIELDS = "name;is_aligned;mapping_quality;score;identity;nodes"
+REAL_FINGERPRINT_AWK = r'''BEGIN { FS = OFS = "\t"; print "read", "aligned", "mapq", "score", "identity", "start", "end", "n_nodes" }
+$0 == "" || /^#/ { next }
+{ n = split($6, nodes, ","); if (n && nodes[n] == "") n--
+  print $1, ($2 == "True"), $3, $4, $5, (n ? nodes[1] : "NA"), (n ? nodes[n] : "NA"), n }'''
+# Arguments: fingerprint.tsv, output directory, number of reads giraffe reports. Writes real_stats.tsv,
+# mapq_hist.tsv and identity_hist.tsv (bins of 0.001); numbers only.
+REAL_STATS_PY = r'''import collections, statistics, sys
+path, out, expected = sys.argv[1], sys.argv[2], int(sys.argv[3])
+names, mapq, identity, reads = set(), collections.Counter(), [], 0
+with open(path) as f:
+    next(f)
+    for line in f:
+        read, aligned, q, score, ident = line.split("\t")[:5]
+        names.add(read)
+        reads += 1
+        if aligned == "1":
+            mapq[int(q)] += 1
+            identity.append(float(ident))
+if len(names) != reads:
+    sys.exit(f"{reads - len(names)} duplicate read names")
+if reads != expected:
+    sys.exit(f"fingerprint has {reads} reads, giraffe reports {expected}")
+aligned = len(identity)
+with open(f"{out}/real_stats.tsv", "w") as f:
+    f.write("reads\taligned_fraction\tmapq0_fraction\tmapq60_fraction\tidentity_mean\tidentity_median\n")
+    f.write(f"{reads}\t{aligned / reads:.6g}\t{mapq[0] / aligned:.6g}\t{mapq[60] / aligned:.6g}\t"
+            f"{statistics.fmean(identity):.6g}\t{statistics.median(identity):.6g}\n")
+with open(f"{out}/mapq_hist.tsv", "w") as f:
+    f.write("mapq\tcount\n" + "".join(f"{q}\t{n}\n" for q, n in sorted(mapq.items())))
+bins = collections.Counter(min(int(i * 1000), 999) for i in identity)
+with open(f"{out}/identity_hist.tsv", "w") as f:
+    f.write("identity_from\tcount\n" + "".join(f"{b / 1000:.3f}\t{n}\n" for b, n in sorted(bins.items())))'''
+PLACEMENT_COLUMNS = ["job_id", "condition", "against", "reads", "aligned_both", "aligned_only_condition",
+                     "aligned_only_against", "different_start", "higher_score_condition", "higher_score_against",
+                     "equal_score"]
+# Arguments: timing job directory, job id, then condition:against pairs. Compares the fingerprints of one job
+# read by read; different_start counts reads aligned by both with a different first node or strand, and the
+# score columns split those reads by which condition scored higher. Writes placement.tsv in the job directory.
+PLACEMENT_PY = r'''import sys
+t, job, pairs = sys.argv[1], sys.argv[2], [p.split(":") for p in sys.argv[3:]]
+cache = {}
+def load(name):
+    if name not in cache:
+        cache[name] = {}
+        with open(f"{t}/round1_{name}/fingerprint.tsv") as f:
+            next(f)
+            for line in f:
+                read, aligned, mapq, score, identity, start = line.split("\t")[:6]
+                cache[name][read] = (aligned == "1", start, int(score))
+    return cache[name]
+with open(f"{t}/placement.tsv", "w") as out:
+    out.write("COLUMNS\n")
+    for cond, against in pairs:
+        a, b = load(cond), load(against)
+        if a.keys() != b.keys():
+            sys.exit(f"{cond} and {against} have different read names")
+        n = dict.fromkeys(["both", "only_a", "only_b", "diff", "higher_a", "higher_b", "equal"], 0)
+        for read, (aligned_a, start_a, score_a) in a.items():
+            aligned_b, start_b, score_b = b[read]
+            if aligned_a and aligned_b:
+                n["both"] += 1
+                if start_a != start_b:
+                    n["diff"] += 1
+                    n["higher_a" if score_a > score_b else "higher_b" if score_b > score_a else "equal"] += 1
+            elif aligned_a or aligned_b:
+                n["only_a" if aligned_a else "only_b"] += 1
+        out.write("\t".join(map(str, [job, cond, against, len(a), *n.values()])) + "\n")'''.replace(
+    "COLUMNS", "\\t".join(PLACEMENT_COLUMNS))
 
 
-def timing_script(conditions, reads):
+def placement_pairs(conditions):
+    """Within each non-reference density group, every other method against the BASELINE_LABEL condition."""
+    base = {c["density_group"]: c["name"] for c in conditions if c["label"] == BASELINE_LABEL}
+    return [(c["name"], base[c["density_group"]]) for c in conditions
+            if c["density_group"] != REFERENCE_GROUP and c["density_group"] in base and c["label"] != BASELINE_LABEL]
+
+
+def timing_script(conditions, reads, real=False, variant=""):
     """One exclusive job that maps the conditions TIMING_ROUNDS times over, reloading the indexes every run.
     Round r starts r-1 places further along the given order, so no condition is always first or last.
-    Only Giraffe runs; each GAM is deleted once written. Speeds are compared within a job."""
-    reads_set = Path(reads).stem
+    Only Giraffe runs; each GAM is deleted once written. Speeds are compared within a job.
+    real: full real-read FASTQ, REAL_THREADS threads, one round in the given order; before each GAM is deleted,
+    a per-read fingerprint and MAPQ/identity statistics are written, and the job ends with placement.tsv."""
+    reads_set = reads_set_name(reads)
     t = DATA_DIR / "results" / reads_set / "timing" / "job$SLURM_JOB_ID"
-    log = DATA_DIR / "logs" / f"timing_{reads_set}.%j.log"
-    mem = f"{max(int(map_mem(c).rstrip('G')) for c in conditions)}G"
+    log = DATA_DIR / "logs" / f"timing_{reads_set}{variant}.%j.log"
     pinned = f"#SBATCH --exclusive\n#SBATCH --exclude={EXCLUDE_NODES}\n"
-    header = "\\t".join(TIMING_COLUMNS)
-    text = sbatch_header(f"timing-{reads_set}", mem, TIMING_TIME, log, extra=pinned)
+    columns, rounds, threads = TIMING_COLUMNS, TIMING_ROUNDS, THREADS
+    if real:
+        columns, rounds, threads = TIMING_COLUMNS + REAL_COLUMNS, 1, REAL_THREADS
+        text = sbatch_header(f"timing-{reads_set}{variant}", REAL_MEM, REAL_TIME, log, REAL_PARTITION, threads, pinned)
+    else:
+        mem = f"{max(int(map_mem(c).rstrip('G')) for c in conditions)}G"
+        text = sbatch_header(f"timing-{reads_set}", mem, TIMING_TIME, log, extra=pinned)
+    header = "\\t".join(columns)
+    formats = "\\t".join(["%s"] * (len(TIMING_COLUMNS) + (2 if real else 0)))
+    real_fields = ("" if not real else
+                   " \\\n        \"$(awk '/Maximum resident/ {printf \"%.2f\", $NF / 1048576}' $D/giraffe.time)\""
+                   " \"$(tail -n 1 $D/real_stats.tsv)\"")
+    # A full real-read GAM is ~90 GB: delete it on any exit, including errors and Slurm's SIGTERM; logs stay.
+    cleanup = "" if not real else """D=
+trap '[ -z "$D" ] || rm -f "$D/mapped.gam"' EXIT
+trap 'exit 143' TERM
+"""
     text += "".join(require_index(c) for c in conditions) + f"""T={t}
 mkdir -p $T
-NODE=$(hostname -s)
+{cleanup}NODE=$(hostname -s)
 printf 'git_commit\\trun_date\\thost\\tjob_id\\n%s\\t%s\\t%s\\t%s\\n' \\
     '{git_commit()}' "$(date -Iseconds)" "$NODE" "$SLURM_JOB_ID" > $T/run_info.tsv
 printf '{header}\\n' > $T/runs.tsv
 # Append one row to runs.tsv from the giraffe.log in $D. Arguments: round, order, condition.
 record() {{
     L=$D/giraffe.log
-    printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$SLURM_JOB_ID" "$NODE" "$1" "$2" "$3" \\
+    printf '{formats}\\n' "$SLURM_JOB_ID" "$NODE" "$1" "$2" "$3" \\
         "$(sed -n 's/.*Loading and initialization: \\([0-9.]*\\) seconds.*/\\1/p' $L)" \\
         "$(sed -n 's/.*Mapped [0-9]* reads across [0-9]* threads in \\([0-9.]*\\) seconds.*/\\1/p' $L)" \\
         "$(sed -n 's/.*Mapping speed: \\([0-9.]*\\) reads per second per thread.*/\\1/p' $L)" \\
         "$(sed -n 's/.*Achieved \\([0-9.]*\\) reads per CPU-second.*/\\1/p' $L)" \\
         "$(sed -n 's/.*Used \\([0-9.]*\\) CPU-seconds.*/\\1/p' $L)" \\
-        "$(sed -n 's/.*Memory footprint: \\([0-9.]*\\) GB.*/\\1/p' $L)" >> $T/runs.tsv
+        "$(sed -n 's/.*Memory footprint: \\([0-9.]*\\) GB.*/\\1/p' $L)"{real_fields} >> $T/runs.tsv
 }}
 """
     order = 0
-    for rnd in range(1, TIMING_ROUNDS + 1):
+    for rnd in range(1, rounds + 1):
         shift = (rnd - 1) % len(conditions)
         for c in conditions[shift:] + conditions[:shift]:
             order += 1
+            stats = "" if not real else f"""{c['vg_binary']} filter -t {threads} -T "{REAL_TSV_FIELDS}" $D/mapped.gam \\
+    | awk '{REAL_FINGERPRINT_AWK}' > $D/fingerprint.tsv
+python3 -I -c '{REAL_STATS_PY}' \\
+    $D/fingerprint.tsv $D "$(sed -n 's/.*Mapped \\([0-9]*\\) reads across.*/\\1/p' $D/giraffe.log)"
+"""
             text += f"""
 # round {rnd}, run {order}: {c['name']}
 D=$T/round{rnd}_{c['name']}
 mkdir -p $D
-/usr/bin/time -v -o $D/giraffe.time {giraffe_cmd(c, reads)} \\
+/usr/bin/time -v -o $D/giraffe.time {giraffe_cmd(c, reads, threads=threads, reads_flag="-f" if real else "-G")} \\
     > $D/mapped.gam 2> $D/giraffe.log
-rm $D/mapped.gam
+{stats}rm $D/mapped.gam
 record {rnd} {order} {c['name']}
+"""
+    if real:
+        pairs = " ".join(f"{a}:{b}" for a, b in placement_pairs(conditions))
+        text += f"""
+# Read-by-read placement comparison of this job's runs
+python3 -I -c '{PLACEMENT_PY}' $T "$SLURM_JOB_ID" {pairs}
+cat $T/placement.tsv
 """
     return text + "cat $T/runs.tsv\n"
 
@@ -587,7 +712,7 @@ RESULT_COLUMNS = [
 
 
 SNAPSHOT_FILES = ["results.tsv", "mcnemar.tsv", "comparison.png", "density_sweep.png",
-                  "filter_summary.tsv", "minimizer_summary.tsv", "timing.tsv"]
+                  "filter_summary.tsv", "minimizer_summary.tsv", "timing.tsv", "timing_runs.tsv", "placement.tsv"]
 
 
 def grep_first(path, pattern, cast=float):
@@ -723,6 +848,25 @@ def timing_summary(conditions, reads_set):
                          "map_s_median": statistics.median(float(r["map_seconds"]) for r in rs),
                          "memory_gb_max": max(float(r["memory_gb"]) for r in rs)})
     return rows
+
+
+TIMING_TABLES = {"runs.tsv": "timing_runs.tsv", "placement.tsv": "placement.tsv"}  # per job -> per read set
+
+
+def concat_tables(paths, out):
+    """Concatenate TSV tables with the same header into out; remove a stale out when there are none."""
+    if not paths:
+        out.unlink(missing_ok=True)
+        return
+    header, rows = None, []
+    for path in paths:
+        lines = path.read_text().splitlines()
+        if header not in (None, lines[0]):
+            sys.exit(f"{path}: header differs from {paths[0]}")
+        header = lines[0]
+        rows += lines[1:]
+    out.write_text("\n".join([header] + rows) + "\n")
+    print(f"wrote {out} ({len(rows)} rows)")
 
 
 def seed_stats(per_read):
@@ -988,7 +1132,7 @@ def plot_density_sweep(rows, path, reads_set):
 
 
 def collect(conditions, reads, snapshot=False):
-    reads_set = Path(reads).stem
+    reads_set = reads_set_name(reads)
     graph_length = grep_first(DATA_DIR / "graph.length.txt", r"length\s+(\d+)", int)
     rows, skipped = [], []
     for c in conditions:
@@ -1010,6 +1154,9 @@ def collect(conditions, reads, snapshot=False):
         write_table(out_dir / "timing.tsv", TIMING_SUMMARY_COLUMNS, timing)
     else:
         (out_dir / "timing.tsv").unlink(missing_ok=True)  # never snapshot a stale timing table
+    # Every timing run, and (real reads) the read-by-read placement comparisons, from all timing jobs.
+    for name in ("runs.tsv", "placement.tsv"):
+        concat_tables(sorted((out_dir / "timing").glob(f"job*/{name}")), out_dir / TIMING_TABLES[name])
     table = out_dir / "results.tsv"
     with open(table, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
@@ -1078,6 +1225,9 @@ def main():
     parser.add_argument("--fixed-nodes", action="store_true",
                         help="submit with sbatch --exclude=<exclude_nodes from the config>")
     parser.add_argument("--sbatch-args", help="extra arguments added to the sbatch command line on --submit")
+    parser.add_argument("--real", action="store_true",
+                        help=f"timing: --reads is a real-read FASTQ; {REAL_THREADS} threads, one round per job, "
+                             "fingerprints and MAPQ/identity statistics, two jobs in opposite orders")
     parser.add_argument("--snapshot", action="store_true",
                         help="collect: also copy the summaries to results_summary/<reads>/ in this repo")
     args = parser.parse_args()
@@ -1085,6 +1235,8 @@ def main():
         sys.exit("--reps must be >= 1 and only applies to the map stage")
     if args.keep_gams and args.stage != "map":
         sys.exit("--keep-gams only applies to the map stage")
+    if args.real and args.stage != "timing":
+        sys.exit("--real only applies to the timing stage")
     if args.run_tag and (args.stage not in ("map", "fingerprint", "determinism")
                          or not re.fullmatch(r"[A-Za-z0-9_-]+", args.run_tag) or re.fullmatch(r"rep\d+", args.run_tag)):
         sys.exit("--run-tag applies to map/fingerprint/determinism and must be a simple name other than rep<N>")
@@ -1135,11 +1287,20 @@ def main():
             check_index_params(c, "map", False)  # exits if the index is missing or stale
         for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
             directory.mkdir(parents=True, exist_ok=True)
-        script = DATA_DIR / "jobs" / f"timing_{Path(args.reads).stem}.sbatch"
-        script.write_text(timing_script(conditions, args.reads))
-        print(f"[{' -> '.join(args.only)}, rotated each round] x {TIMING_ROUNDS} rounds -> {script}")
-        if args.submit:
-            for _ in range(TIMING_JOBS):
+        if not args.real:
+            script = DATA_DIR / "jobs" / f"timing_{Path(args.reads).stem}.sbatch"
+            script.write_text(timing_script(conditions, args.reads))
+            print(f"[{' -> '.join(args.only)}, rotated each round] x {TIMING_ROUNDS} rounds -> {script}")
+            if args.submit:
+                for _ in range(TIMING_JOBS):
+                    submit(script, args)
+            return
+        # Real reads: one round per job, the second job in reverse order.
+        for variant, order in (("_order1", conditions), ("_order2", conditions[::-1])):
+            script = DATA_DIR / "jobs" / f"timing_{reads_set_name(args.reads)}{variant}.sbatch"
+            script.write_text(timing_script(order, args.reads, real=True, variant=variant))
+            print(f"[{' -> '.join(c['name'] for c in order)}] x 1 round, {REAL_THREADS} threads -> {script}")
+            if args.submit:
                 submit(script, args)
         return
     if args.stage == "fingerprint":
