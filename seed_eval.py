@@ -778,6 +778,7 @@ RESULT_COLUMNS = [
     "seeds_per_read_median", "seeds_per_read_mean", "seeds_per_read_p90",
     "kept_minimizers_per_read", "mean_hits_per_kept_minimizer",
     "timed_jobs", "timed_speed_median", "timed_ratio_min", "timed_ratio_max",
+    "seeds_per_read_p99", "seeds_per_read_max",
 ]
 
 
@@ -940,13 +941,14 @@ def concat_tables(paths, out):
 
 
 def seed_stats(per_read):
-    """Median, mean and nearest-rank 90th percentile of seeds per read (stage.seed.results)."""
+    """Median, mean, nearest-rank 90th and 99th percentiles and maximum of seeds per read (stage.seed.results)."""
     with open(per_read, newline="") as f:
         seeds = sorted(int(r["seeds"]) for r in csv.DictReader(f, delimiter="\t") if r["seeds"] != "NA")
     if not seeds:
         return {}
     return {"seeds_per_read_median": statistics.median(seeds), "seeds_per_read_mean": statistics.mean(seeds),
-            "seeds_per_read_p90": seeds[math.ceil(0.9 * len(seeds)) - 1]}
+            "seeds_per_read_p90": seeds[math.ceil(0.9 * len(seeds)) - 1],
+            "seeds_per_read_p99": seeds[math.ceil(0.99 * len(seeds)) - 1], "seeds_per_read_max": seeds[-1]}
 
 
 def format_value(value):
@@ -1087,7 +1089,7 @@ def plot_comparison(rows, path, reads_set, tests=()):
 
     # The seeds panel needs this read set's density runs; leave it out if none exist.
     has_seeds = any(r.get("seeds_per_read_median") is not None for r in rows)
-    panels = 3 if has_seeds else 2
+    panels = 4 if has_seeds else 2
     fig, axes = plt.subplots(1, panels, figsize=(panels * max(5, 0.55 * len(rows) + 1.5), 5.2))
     ax_err, ax_speed = axes[0], axes[1]
     error = [100 * r["wrong"] / r["eligible"] for r in rows]
@@ -1143,6 +1145,21 @@ def plot_comparison(rows, path, reads_set, tests=()):
         ax_seeds.set_title(f"Seed hits per read (graph positions)\non {reads_set} (solid: median, light: mean)",
                            fontsize=11, color=ink, loc="left")
 
+        # The high end gets its own panel: p99 and the maximum are one to two orders of magnitude above the
+        # median and would flatten the panel above. Bar: p99; number above it: the maximum (one read, noisy).
+        ax_high = axes[3]
+        for i, r in zip(x, rows):
+            p99, top_read = r.get("seeds_per_read_p99"), r.get("seeds_per_read_max")
+            if p99 is None:
+                continue
+            ax_high.bar(i, p99, color=colors[i], width=0.6)
+            ax_high.annotate(f"{top_read}", (i, p99), xytext=(0, 3), textcoords="offset points", ha="center",
+                             va="bottom", fontsize=7 if labelled else 6, rotation=0 if labelled else 90, color=ink)
+        top = max((r.get("seeds_per_read_p99") or 0) for r in rows)
+        ax_high.set_ylim(0, (1.2 if labelled else 1.6) * top if top > 0 else 1)
+        ax_high.set_title(f"Seed hits per read, high end\non {reads_set} (bar: p99, number: maximum)",
+                          fontsize=11, color=ink, loc="left")
+
     for ax in axes:
         ax.set_xticks(list(x))
         ax.set_xticklabels(names, rotation=45, ha="right", rotation_mode="anchor", fontsize=9, color=ink)
@@ -1176,7 +1193,7 @@ def plot_density_sweep(rows, path, reads_set):
     series += [(r["label"], REFERENCE_COLOR, [r]) for r in rows if r["density_group"] == REFERENCE_GROUP]
     point = dict(marker="o", ms=7, markeredgecolor="#fcfcfb", markeredgewidth=1.5)
 
-    fig, (ax_err, ax_seeds, ax_mem) = plt.subplots(1, 3, figsize=(16, 5.2))
+    fig, (ax_err, ax_seeds, ax_high, ax_mem) = plt.subplots(1, 4, figsize=(21, 5.2))
     top_error = 0.0
     for label, color, members in series:
         error = [100 * r["wrong"] / r["eligible"] for r in members]
@@ -1187,13 +1204,16 @@ def plot_density_sweep(rows, path, reads_set):
                       color=color, lw=2, **point)
         ax_seeds.plot([m["density_reads"] for m in seeds], [m["seeds_per_read_median"] for m in seeds],
                       color=color, lw=1.5, ls="--", **point)
+        high = [m for m in members if m.get("seeds_per_read_p99") is not None]
+        ax_high.plot([m["density_reads"] for m in high], [m["seeds_per_read_p99"] for m in high], color=color, lw=2, **point)
         mem = [m for m in members if m.get("giraffe_mem_gb") is not None]
         ax_mem.plot([m["density_reads"] for m in mem], [m["giraffe_mem_gb"] for m in mem], color=color, lw=2, **point)
 
     titles = ["Mismapped reads\n(% of reads with a truth position on CHM13)",
               f"Seed hits per read (graph positions)\non {reads_set} (solid: mean, dashed: median)",
+              f"Seed hits per read, p99\non {reads_set} (own panel: far above the median)",
               "Giraffe memory (GB)"]
-    for ax, title in zip((ax_err, ax_seeds, ax_mem), titles):
+    for ax, title in zip((ax_err, ax_seeds, ax_high, ax_mem), titles):
         ax.set_title(title, fontsize=11, color=ink, loc="left")
         ax.set_xlabel("Measured seed density on reads (seeds / bp)", color=muted)
         ax.set_ylim(bottom=0)

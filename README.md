@@ -247,6 +247,7 @@ To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nod
 | `timed_jobs` | number of `timing` jobs this condition ran in (`NA` without a timing run) |
 | `timed_speed_median` | median over timing jobs of the per-job median speed (reads/s/thread); descriptive only, since nodes differ |
 | `timed_ratio_min`, `timed_ratio_max` | range over timing jobs of the speed ratio against the `reference` condition **in the same job** |
+| `seeds_per_read_p99`, `seeds_per_read_max` | high end of seeds per read: nearest-rank 99th percentile and maximum (the maximum is one read, so it is noisy); appended after the older columns, which keep their positions |
 
 ### timing.tsv (fixed-hardware speed, written when timing runs exist)
 
@@ -278,12 +279,16 @@ method, with the `reference` group last; each method has its own color and the
 reference is gray. If the read set has no replicates, the speed panel is titled
 "single run, not for comparison". Seed columns are only filled from a density run on
 the same read set; without one they are `NA`, and if no condition has one the seeds
-panel is left out.
+panel is left out. A fourth panel shows the high end of seeds per read: a bar for the
+99th percentile and the maximum as a number above it (vertical when the bars carry no
+other labels). It is a separate panel because p99 and the maximum are one to two orders
+of magnitude above the median and would flatten the median and mean bars.
 
 `density_sweep.png` is drawn only when the read set has results at two or more
 density groups. Its x axis is the measured density on reads (`density_reads`); the
-three panels show mismapped reads (% of reads with a truth position on CHM13), seed
-hits per read (mean solid, median dashed) and giraffe memory. Each method is one line
+four panels show mismapped reads (% of reads with a truth position on CHM13), seed
+hits per read (mean solid, median dashed), the 99th percentile of seed hits per read
+(its own panel, for the same scale reason) and giraffe memory. Each method is one line
 and reference conditions are gray points.
 
 ### mcnemar.tsv (paired accuracy comparison)
