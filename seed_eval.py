@@ -959,6 +959,9 @@ def format_value(value):
 
 REFERENCE_GROUP = "reference"  # density_group of the condition every other one is tested against
 BASELINE_LABEL = "minimizer"  # within a density group, the other methods are tested against this label
+# Methods placed in a density group by their measured density rather than the w/s formula; they are also
+# tested against every other method of their group.
+DENSITY_MATCHED_LABELS = ("minimaxmer",)
 MCNEMAR_COLUMNS = ["family", "condition", "against", "eligible_both", "wrong_condition", "wrong_against",
                    "only_condition_correct", "only_against_correct", "net_reads", "net_percent",
                    "p_exact", "m_tests", "p_bonferroni"]
@@ -980,9 +983,10 @@ def primary_compare(c, reads_set):
 
 
 def mcnemar_table(rows, reads_set):
-    """Paired exact McNemar tests on per-read correctness: every condition against the reference group, and
-    every other method against BASELINE_LABEL within each density group. Bonferroni over all tests of this
-    read set. net_reads = only_condition_correct - only_against_correct (positive: condition is better)."""
+    """Paired exact McNemar tests on per-read correctness: every condition against the reference group,
+    every other method against BASELINE_LABEL within each density group, and a DENSITY_MATCHED_LABELS method
+    also against each other method of its group. Bonferroni over all tests of this read set.
+    net_reads = only_condition_correct - only_against_correct (positive: condition is better)."""
     pairs = []
     reference = [r for r in rows if r["density_group"] == REFERENCE_GROUP]
     if reference:
@@ -991,6 +995,9 @@ def mcnemar_table(rows, reads_set):
         members = [r for r in rows if r["density_group"] == group]
         for base in [r for r in members if r["label"] == BASELINE_LABEL][:1]:
             pairs += [(f"within_{group}", r, base) for r in members if r is not base]
+        for matched in [r for r in members if r["label"] in DENSITY_MATCHED_LABELS]:
+            pairs += [(f"within_{group}", matched, r) for r in members
+                      if r is not matched and r["label"] not in (BASELINE_LABEL, *DENSITY_MATCHED_LABELS)]
     per_read = {}
     for r in rows:
         per_read[r["name"]] = read_compare(primary_compare(r, reads_set))
@@ -1020,7 +1027,7 @@ def signed(n):
     return "±0" if n == 0 else (f"+{n}" if n > 0 else f"−{-n}")
 
 
-METHOD_COLORS = ["#2a78d6", "#eb6834", "#1baf7a"]  # categorical slots 1-3 of the reference palette
+METHOD_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]  # categorical slots 1-4 of the reference palette
 REFERENCE_COLOR = "#8a8984"
 MAX_LABELLED_CONDITIONS = 6  # above this, bars carry no value labels
 
