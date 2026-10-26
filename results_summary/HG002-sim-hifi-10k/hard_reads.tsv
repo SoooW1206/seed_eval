@@ -1,0 +1,5 @@
+reads_set	subset	eligible	wrong_minimax_k31w20	wrong_mini_k31w10	wrong_sync_k31s21	wrong_miniW_k31w10	only_minimax_k31w20_correct_vs_mini_k31w10	only_mini_k31w10_correct	p_minimax_k31w20_vs_mini_k31w10	only_minimax_k31w20_correct_vs_sync_k31s21	only_sync_k31s21_correct	p_minimax_k31w20_vs_sync_k31s21	only_minimax_k31w20_correct_vs_miniW_k31w10	only_miniW_k31w10_correct	p_minimax_k31w20_vs_miniW_k31w10
+HG002-sim-hifi-10k	all	9353	61	62	63	63	10	9	1	8	6	0.79	9	7	0.8
+HG002-sim-hifi-10k	selector_top10	454	50	50	52	51	9	9	1	7	5	0.77	8	7	1
+HG002-sim-hifi-10k	group_top10	492	49	50	51	51	9	8	1	7	5	0.77	8	6	0.79
+HG002-sim-hifi-10k	hits_differ	821	58	60	61	60	10	8	0.81	8	5	0.58	9	7	0.8

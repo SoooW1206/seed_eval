@@ -377,6 +377,29 @@ graph, so in an error-free window that exists on a graph haplotype every kept se
 still be in the index. The Python prototype implements step 3 (`--rspace`) for such
 comparisons.
 
+### Analyses of minimaxmers against the 2/11 group
+
+Three scripts compare methods read by read on results that already exist (numbers only):
+
+- `prototype/stage_work.py RESULTS_DIR METHOD ...`: work per read in each giraffe stage
+  (seeds, zipcode trees, chains, alignments, aligner invocations and bases), from
+  `density/stage_counts.jsonl`, which `sbatch -o LOG prototype/stage_counts.sh RESULTS_DIR VG
+  CONDITION ...` extracts from the density provenance with `vg view -aj | jq` (stage `results`
+  counts and the aligner's per-read totals; no timings). Median, mean, p99, total, and an exact sign test against
+  the first method. A hardware-independent stand-in for speed.
+- `prototype/hard_reads.py RESULTS_DIR METHOD ... --selector mini_k31w20`: accuracy and exact
+  McNemar tests on the hard reads, the 10% with the most seed hits under a condition that
+  is not compared (so the choice favours none), and, where every method has a density run,
+  under the compared methods themselves; `--deciles PLOT` plots the error rate per decile of
+  the selector's seed hits.
+- `prototype/mapq_pr.py RESULTS_DIR METHOD ...`: MAPQ distribution, reads kept and wrong at
+  MAPQ thresholds, a paired test on reads wrong at MAPQ 60, and the precision-recall curve
+  of the lab's `plot-pr.R`.
+
+Their outputs are in `results_summary/HG002-sim-hifi-10k/` (`stage_work.tsv`,
+`hard_reads.tsv`, `mapq.tsv`, `pr.png`) and `results_summary/HG002-sim-hifi-100k/`
+(`hard_reads.tsv`, `mapq.tsv`, `pr.png`, `error_by_seed_decile.png`).
+
 ### Count table (`prototype/minimax_counts.cpp`)
 
 The counts minimaxmer selection needs, for every canonical k-mer in the graph:
