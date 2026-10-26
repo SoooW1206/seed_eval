@@ -100,10 +100,10 @@ def test_genome_count_avoids_repetitive_kmer():
     seq = random_seq(3000)
     k, w = 31, 20
     plain, _ = mm.select_minimaxmers(seq, k, w)
-    repetitive = {code for _, _, code in plain[::3]}          # pretend every third minimizer is repetitive
-    counts = lambda code: 1000 if code in repetitive else 1
+    repetitive = {mm.count_key(code, k) for _, _, code in plain[::3]}  # pretend every third minimizer is repetitive
+    counts = lambda key: 1000 if key in repetitive else 1
     got, _ = mm.select_minimaxmers(seq, k, w, genome_count=counts)
-    chosen = {code for _, _, code in got}
+    chosen = {mm.count_key(code, k) for _, _, code in got}
     assert not (chosen & repetitive), "a high-genome-count k-mer was selected while a unique one was available"
     return f"{len(repetitive)} k-mers given genome count 1000 are never selected (k=31, w=20)"
 
@@ -112,16 +112,16 @@ def test_reads_count_breaks_ties():
     seq = random_seq(3000)
     k, w = 31, 20
     plain, _ = mm.select_minimaxmers(seq, k, w)
-    plain_codes = {code for _, _, code in plain}
+    plain_keys = {mm.count_key(code, k) for _, _, code in plain}
     kmers = mm.canonical_kmers(seq, k)
     # Non-minimizers at least 2w apart, so no window contains two of them.
     favoured, last = set(), -10 * w
     for off, kmer in enumerate(kmers):
-        if kmer and kmer[0] not in plain_codes and off - last >= 2 * w and len(favoured) < 20:
-            favoured.add(kmer[0])
+        if kmer and mm.count_key(kmer[0], k) not in plain_keys and off - last >= 2 * w and len(favoured) < 20:
+            favoured.add(mm.count_key(kmer[0], k))
             last = off
-    got, _ = mm.select_minimaxmers(seq, k, w, reads_count=lambda code: 50 if code in favoured else 1)
-    chosen = {code for _, _, code in got}
+    got, _ = mm.select_minimaxmers(seq, k, w, reads_count=lambda key: 50 if key in favoured else 1)
+    chosen = {mm.count_key(code, k) for _, _, code in got}
     assert favoured <= chosen, "a k-mer with a higher reads count lost against an equal genome count"
     return "20 k-mers that plain minimizers skip are all selected once their reads count is higher"
 
@@ -144,10 +144,10 @@ def test_edge_cases():
     got, _ = mm.select_minimaxmers(with_n, k, w)
     assert all(not (off <= 200 < off + k) for off, _, _ in got), "a k-mer containing N was selected"
     plain, _ = mm.select_minimaxmers(seq, k, w)
-    absent = plain[0][2]
+    absent = mm.count_key(plain[0][2], k)
     skip, _ = mm.select_minimaxmers(seq, k, w, genome_count=lambda c: 0 if c == absent else 1)
     keep, _ = mm.select_minimaxmers(seq, k, w, genome_count=lambda c: 0 if c == absent else 1, skip_absent=False)
-    assert absent not in {c for _, _, c in skip} and absent in {c for _, _, c in keep}
+    assert absent not in {mm.count_key(c, k) for _, _, c in skip} and absent in {mm.count_key(c, k) for _, _, c in keep}
     return "short sequence -> nothing; k-mers with N never selected; genome_count 0 skipped unless skip_absent=False"
 
 
@@ -161,12 +161,69 @@ def test_window_counts():
     return f"every selected k-mer wins >= 1 window; total wins {sum(wins.values())} for {windows} windows"
 
 
+def repetitive_seq():
+    """Random sequence with short tandem repeats (a k-mer recurs within one window, so windows have tied
+    minima) and a dispersed repeat."""
+    short, other, block = random_seq(7), random_seq(5), random_seq(300)
+    return (random_seq(400) + short * 30 + random_seq(200) + other * 40 + random_seq(150) + block
+            + random_seq(150) + block + random_seq(300))
+
+
+def test_robust_winners_without_ties():
+    k, w = 31, 20
+    seq = random_seq(3000)
+    plain, _ = mm.select_minimaxmers(seq, k, w)
+    keys = [None if x is None else (1, mm.READS_COUNT_MAX, x[1] >> 32) for x in mm.canonical_kmers(seq, k)]
+    nw = mm.robust_window_counts(seq, k, w, keys)
+    windows = len(keys) - w + 1
+    assert set(nw) == {off for off, _, _ in plain}, "without ties, robust winners must be the plain minimizers"
+    assert sum(nw.values()) == windows, "every window must have exactly one winner"
+    return f"no ties: winners = plain minimizers, {sum(nw.values())} wins for {windows} windows"
+
+
+def test_robust_winners_with_ties():
+    k, w = 31, 20
+    seq = repetitive_seq()
+    keys = [None if x is None else (1, mm.READS_COUNT_MAX, x[1] >> 32) for x in mm.canonical_kmers(seq, k)]
+    nw = mm.robust_window_counts(seq, k, w, keys)
+    windows = len(keys) - w + 1
+    tied = sum(1 for s in range(windows) if keys[s:s + w].count(min(keys[s:s + w])) > 1)
+    assert tied > 0, "the test sequence must have tied windows"
+    extra = sum(nw.values()) - windows
+    assert 0 <= extra, "a window lost its winner"
+    rc = revcomp(seq)
+    keys_rc = [None if x is None else (1, mm.READS_COUNT_MAX, x[1] >> 32) for x in mm.canonical_kmers(rc, k)]
+    nw_rc = mm.robust_window_counts(rc, k, w, keys_rc)
+    mirrored = {len(seq) - k - p: n for p, n in nw.items()}
+    assert mirrored == dict(nw_rc), "window winners must mirror between a sequence and its reverse complement"
+    return f"{tied} windows with tied minima; one winner per window (+{extra} for self-RC windows); winners mirror under RC"
+
+
+def test_sparse_thinning():
+    k, w = 31, 20
+    for seq in (random_seq(4000), repetitive_seq()):
+        for rspace in (0, 20, 100):
+            accepted, nw = mm.select_sparse(seq, k, w, rspace)
+            assert set(accepted) <= set(nw), "only window winners can be accepted"
+            if rspace == 0:
+                assert set(accepted) == set(nw), "rspace 0 must keep every window winner"
+            else:
+                assert all(b - a >= rspace for a, b in zip(accepted, accepted[1:])), "accepted seeds closer than rspace"
+            rc_accepted, _ = mm.select_sparse(revcomp(seq), k, w, rspace)
+            assert sorted(len(seq) - k - p for p in accepted) == rc_accepted, "thinning must mirror under RC"
+    seq = random_seq(5000)
+    counts = [len(mm.select_sparse(seq, k, w, r)[0]) for r in (0, 20, 100)]
+    assert counts[0] > counts[1] > counts[2], counts
+    return f"spacing respected, RC-mirrored, rspace 0 keeps all winners; 5 kbp seeds at rspace 0/20/100: {counts}"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--oracle")
     args = parser.parse_args()
     tests = [test_rolling_encoding, test_density, test_genome_count_avoids_repetitive_kmer,
-             test_reads_count_breaks_ties, test_reverse_complement_symmetry, test_edge_cases, test_window_counts]
+             test_reads_count_breaks_ties, test_reverse_complement_symmetry, test_edge_cases, test_window_counts,
+             test_robust_winners_without_ties, test_robust_winners_with_ties, test_sparse_thinning]
     oracle_tests = [test_encoding_and_hash_against_gbwtgraph, test_constant_counts_equal_gbwtgraph]
     failed = 0
     for test in oracle_tests + tests:

@@ -12,3 +12,4 @@ sync_k31s7	default	-c -k 31 -s 7	80G	2/25	closed syncmer
 miniW_k31w10	default	-W -k 31 -w 10	256G	2/11	weighted minimizer		96G
 miniW_k31w16	default	-W -k 31 -w 16	256G	2/17	weighted minimizer		
 miniW_k31w24	default	-W -k 31 -w 24	256G	2/25	weighted minimizer		
+minimax_k31w20	/private/home/twang285/bin/vg_minimax	-k 31 -w 20 --minimaxmer-counts /private/groups/patenlab/twang285/seed-eval/counts/HG002Revio_full_k31_graph.mmc	160G	2/11	minimaxmer	--minimaxmer-counts /private/groups/patenlab/twang285/seed-eval/counts/HG002Revio_full_k31_graph.mmc	160G

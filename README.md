@@ -132,6 +132,16 @@ closed syncmers should have roughly the same seed density when w = k - s.").
 rejecting them: `k` below 2 becomes 2, `w` or `s` of 0 becomes 1, and `s >= k`
 becomes `k - 1`. Nothing requires `w >= k`; the vg default is k29 w11.
 
+**`minimax_k31w20` is the exception.** It uses `vg_minimax` (vg + gbwtgraph on the
+`minimaxmer` branches) with `--minimaxmer-counts` in both `index_args` and
+`giraffe_args`, and its `w` is 20, not the formula value for its group. Its
+`density_group` is `2/11` because its measured density matches that group: on the 1k
+simulated reads minimaxmers at w = 20 select 0.186 k-mers per bp (1.99 times
+`mini_k31w20`), against 0.181-0.182 for the 2/11 rows on 10k reads. Compare it with
+the 2/11 rows, with the 2/21 rows as the same-`w` reference. Its index build peaked at
+120 GiB and its giraffe needs the 2/11 memory plus ~34 GB for the counts table, hence
+160G for both.
+
 ## Stages
 
 Run from the repo directory. Every stage except `collect` only **writes** sbatch
@@ -338,6 +348,29 @@ sbatch -o LOG prototype/run_on_reads.sh TRUTH.gam OUT_DIR /path/to/vg
 python3 -I prototype/compare_with_vg.py OUT_DIR/per_read_constant.tsv \
     data_dir/results/<reads>/<condition>/density/per_read.tsv OUT_DIR/per_read_counted.tsv --out comparison.tsv
 ```
+
+### Design: no step 3 in vg
+
+Yoshi runs all three steps (window minimum, windows won, uniformly sparse thinning)
+independently on the reference and on the reads, and keeps the k-mers selected on
+both. Our vg version (`vg_minimax`) implements steps 1 and 2 only, on both sides: the
+index stores every window minimum (vg's rule, every tied minimum is selected), and
+giraffe selects the read's window minima the same way, then applies its own filters
+(window downsampling and the `--max-min` / `--num-bp-per-min` cap with `-b hifi`)
+instead of step 3.
+
+Step 3 cannot be done on the graph side the way Yoshi does it on a linear reference:
+gbwtgraph does not select minimizers along whole haplotypes but on short haplotype
+windows around each node (a node plus `k + w - 2` bases of each haplotype
+continuation). That gives the same result as whole haplotypes for any rule that depends
+on one window only, but Yoshi's thinning accepts seeds greedily by priority and blocks
+their neighbours, so a decision can depend on seeds far away and cannot be made
+consistently on those short windows. A possible later experiment is step 3 on the read
+side only: it would only pick among the read's step-1 window winners (one of the tied
+minima, by Yoshi's robust winnowing), which are winners of the same window in the
+graph, so in an error-free window that exists on a graph haplotype every kept seed would
+still be in the index. The Python prototype implements step 3 (`--rspace`) for such
+comparisons.
 
 ### Count table (`prototype/minimax_counts.cpp`)
 
