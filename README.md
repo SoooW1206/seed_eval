@@ -161,7 +161,7 @@ the `sbatch` command line; the generated scripts do not change.
 | collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `mcnemar.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
 | fingerprint | `python3 seed_eval.py fingerprint --reads GAM [--run-tag TAG] --submit` | one job per run that has a `mapped.gam` (`<name>/rep*`, or `<name>/TAG/rep*`): `fingerprint.tsv` in the run directory |
 | determinism | `python3 seed_eval.py determinism --reads GAM --run-tag TAG` | runs locally: `results/<reads>/determinism/summary.tsv`, `reads.tsv` |
-| timing | `python3 seed_eval.py timing --reads GAM --only A B C REF [--real] --submit` | one exclusive job, submitted twice (`--real`: two jobs in opposite orders): `results/<reads>/timing/job<ID>/runs.tsv`, `run_info.tsv`, per run `round<r>_<name>/giraffe.log`, `giraffe.time` (`--real`: also `fingerprint.tsv`, statistics, `placement.tsv`) |
+| timing | `python3 seed_eval.py timing --reads GAM --only A B C REF [--real [--sampled]] [--no-exclusive] [--jobs N] [--rounds R] --submit` | one exclusive job, submitted twice (`--real`: two jobs in opposite orders; `--jobs N`: N scripts, submitted by hand): `results/<reads>/timing/job<ID>/runs.tsv`, `run_info.tsv`, per run `round<r>_<name>/giraffe.log`, `giraffe.time` (`--real`: also `fingerprint.tsv`, statistics, `placement.tsv`) |
 
 What each job runs:
 
@@ -215,6 +215,20 @@ What each job runs:
   `minimizer` label of its density group). Read set name: the file name without
   `.fastq.gz`/`.fq.gz`. Real-read (64 threads) and simulated-read (16 threads) speeds are
   reported separately and are not comparable.
+- **timing, repeated on shared nodes**: `--no-exclusive` leaves out `--exclusive` and
+  `--exclude` (and then needs no `exclude_nodes` in the config); `--rounds R` sets the
+  rounds per job (default 3); `--jobs N` writes N scripts `timing_<reads>_job1..N.sbatch`,
+  job k starting its rounds k-1 places further along the `--only` order, so over the jobs
+  every condition runs first and last. `--jobs` refuses `--submit`: submit the scripts by
+  hand in `--dependency=afterany` chains to limit how many run at once. Without these
+  options the generated scripts are unchanged. On shared nodes wall-clock times depend on
+  the neighbours, so only ratios within a job are compared, over many jobs
+  (`prototype/timing_repeats.py`).
+- **timing --real --sampled**: `--reads` is a sample of real reads (e.g. 100k from
+  `prototype/sample_fastq.py`), mapped like simulated reads (16 threads, the rotated
+  rounds, map memory, partition `medium`) with `--real`'s fingerprints, statistics and
+  `placement.tsv` (from round 1). Works with `--no-exclusive`, `--jobs` and `--rounds`;
+  full `--real` runs do not take `--jobs` or `--rounds`.
 
 Typical order: index → for each read set: map and density → filters → collect.
 To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nodes`
@@ -377,9 +391,22 @@ graph, so in an error-free window that exists on a graph haplotype every kept se
 still be in the index. The Python prototype implements step 3 (`--rspace`) for such
 comparisons.
 
+### Repeated speed measurements
+
+- `python3 -I prototype/sample_fastq.py --total N --n 100000 --seed S --names NAMES < FASTQ > OUT`:
+  a uniform sample of exactly n reads without replacement (`random.Random(S).sample(range(N), n)`),
+  kept in input order; stops unless the input has exactly N four-line records. Writes the
+  sampled read names (no sequences) to NAMES.
+- `python3 -I prototype/timing_repeats.py TIMING_DIR JOB_ID ... [--ref mini_k31w20] [--out PREFIX]`:
+  for the given jobs only, each condition's median over rounds of `load_seconds`,
+  `map_seconds` and `reads_per_cpu_second`, divided by the reference's in the same job;
+  across jobs the median, quartiles, range, and the fraction of jobs with a ratio above 1.
+  For real reads also aligned fraction, MAPQ and identity over all runs, the pooled MAPQ
+  histogram, and `placement.tsv` summed over jobs.
+
 ### Analyses of minimaxmers against the 2/11 group
 
-Three scripts compare methods read by read on results that already exist (numbers only):
+These scripts compare methods read by read (numbers only):
 
 - `prototype/stage_work.py RESULTS_DIR METHOD ...`: work per read in each giraffe stage
   (seeds, zipcode trees, chains, alignments, aligner invocations and bases), from
@@ -395,10 +422,16 @@ Three scripts compare methods read by read on results that already exist (number
 - `prototype/mapq_pr.py RESULTS_DIR METHOD ...`: MAPQ distribution, reads kept and wrong at
   MAPQ thresholds, a paired test on reads wrong at MAPQ 60, and the precision-recall curve
   of the lab's `plot-pr.R`.
+- `prototype/mapq60_reads.py MAPQ60_DIR ANNOTATION_DIR METHOD ...`: one row per read wrong at MAPQ 60 in any
+  method, from re-mapping just those reads with `--track-provenance` (data dir
+  `jobs/mapq60_provenance_*.sbatch`): truth span, each method's mapped span, distance, MAPQ, seeds, chains,
+  whether the read went to the other copy of a segmental duplication, and the T2T censat classes
+  (`chm13v2.0_censat_v2.1.bed`) and SD bases (`chm13v2.0_SD.bed`) under the truth span; `caveat` marks
+  truth on chrY and alignments without a CHM13 position.
 
 Their outputs are in `results_summary/HG002-sim-hifi-10k/` (`stage_work.tsv`,
 `hard_reads.tsv`, `mapq.tsv`, `pr.png`) and `results_summary/HG002-sim-hifi-100k/`
-(`hard_reads.tsv`, `mapq.tsv`, `pr.png`, `error_by_seed_decile.png`).
+(`hard_reads.tsv`, `mapq.tsv`, `pr.png`, `error_by_seed_decile.png`, `mapq60_reads.tsv`, `mapq60_summary.tsv`).
 
 ### Count table (`prototype/minimax_counts.cpp`)
 

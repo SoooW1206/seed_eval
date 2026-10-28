@@ -453,23 +453,27 @@ def placement_pairs(conditions):
             if c["density_group"] != REFERENCE_GROUP and c["density_group"] in base and c["label"] != BASELINE_LABEL]
 
 
-def timing_script(conditions, reads, real=False, variant=""):
+def timing_script(conditions, reads, real=False, variant="", exclusive=True, rounds=None, offset=0, sampled=False):
     """One exclusive job that maps the conditions TIMING_ROUNDS times over, reloading the indexes every run.
-    Round r starts r-1 places further along the given order, so no condition is always first or last.
+    Round r starts offset + r - 1 places further along the given order, so no condition is always first or last.
     Only Giraffe runs; each GAM is deleted once written. Speeds are compared within a job.
     real: full real-read FASTQ, REAL_THREADS threads, one round in the given order; before each GAM is deleted,
-    a per-read fingerprint and MAPQ/identity statistics are written, and the job ends with placement.tsv."""
+    a per-read fingerprint and MAPQ/identity statistics are written, and the job ends with placement.tsv.
+    sampled (with real): a sampled real-read FASTQ, mapped with the settings of simulated reads (THREADS
+    threads, the rounds, map memory) and with real's fingerprints, statistics and placement.tsv.
+    exclusive=False: no --exclusive and no --exclude, for many repeated jobs on shared nodes.
+    rounds: rounds per job instead of TIMING_ROUNDS (full real reads: 1)."""
     reads_set = reads_set_name(reads)
     t = DATA_DIR / "results" / reads_set / "timing" / "job$SLURM_JOB_ID"
     log = DATA_DIR / "logs" / f"timing_{reads_set}{variant}.%j.log"
-    pinned = f"#SBATCH --exclusive\n#SBATCH --exclude={EXCLUDE_NODES}\n"
-    columns, rounds, threads = TIMING_COLUMNS, TIMING_ROUNDS, THREADS
-    if real:
-        columns, rounds, threads = TIMING_COLUMNS + REAL_COLUMNS, 1, REAL_THREADS
+    pinned = f"#SBATCH --exclusive\n#SBATCH --exclude={EXCLUDE_NODES}\n" if exclusive else ""
+    columns, rounds, threads = TIMING_COLUMNS + (REAL_COLUMNS if real else []), rounds or TIMING_ROUNDS, THREADS
+    if real and not sampled:
+        rounds, threads = 1, REAL_THREADS
         text = sbatch_header(f"timing-{reads_set}{variant}", REAL_MEM, REAL_TIME, log, REAL_PARTITION, threads, pinned)
     else:
         mem = f"{max(int(map_mem(c).rstrip('G')) for c in conditions)}G"
-        text = sbatch_header(f"timing-{reads_set}", mem, TIMING_TIME, log, extra=pinned)
+        text = sbatch_header(f"timing-{reads_set}{variant}", mem, TIMING_TIME, log, extra=pinned)
     header = "\\t".join(columns)
     formats = "\\t".join(["%s"] * (len(TIMING_COLUMNS) + (2 if real else 0)))
     real_fields = ("" if not real else
@@ -500,7 +504,7 @@ record() {{
 """
     order = 0
     for rnd in range(1, rounds + 1):
-        shift = (rnd - 1) % len(conditions)
+        shift = (offset + rnd - 1) % len(conditions)
         for c in conditions[shift:] + conditions[:shift]:
             order += 1
             stats = "" if not real else f"""{c['vg_binary']} filter -t {threads} -T "{REAL_TSV_FIELDS}" $D/mapped.gam \\
@@ -1326,6 +1330,15 @@ def main():
     parser.add_argument("--real", action="store_true",
                         help=f"timing: --reads is a real-read FASTQ; {REAL_THREADS} threads, one round per job, "
                              "fingerprints and MAPQ/identity statistics, two jobs in opposite orders")
+    parser.add_argument("--sampled", action="store_true",
+                        help=f"timing --real: the FASTQ is a sample (e.g. 100k reads); {THREADS} threads and "
+                             f"{TIMING_ROUNDS} rotated rounds as for simulated reads, keeping --real's statistics")
+    parser.add_argument("--no-exclusive", action="store_true",
+                        help="timing: no --exclusive and no --exclude (shared nodes; for --jobs)")
+    parser.add_argument("--jobs", type=int,
+                        help="timing (not full --real): write N scripts, job k starting its rounds k-1 places "
+                             "further along the order; submit them by hand (not with --submit)")
+    parser.add_argument("--rounds", type=int, help=f"timing (not full --real): rounds per job (default {TIMING_ROUNDS})")
     parser.add_argument("--snapshot", action="store_true",
                         help="collect: also copy the summaries to results_summary/<reads>/ in this repo")
     args = parser.parse_args()
@@ -1335,6 +1348,16 @@ def main():
         sys.exit("--keep-gams only applies to the map stage")
     if args.real and args.stage != "timing":
         sys.exit("--real only applies to the timing stage")
+    if (args.sampled or args.no_exclusive or args.jobs or args.rounds) and args.stage != "timing":
+        sys.exit("--sampled, --no-exclusive, --jobs and --rounds only apply to the timing stage")
+    if args.sampled and not args.real:
+        sys.exit("--sampled needs --real")
+    if (args.jobs or args.rounds) and args.real and not args.sampled:
+        sys.exit("--jobs and --rounds do not apply to full --real runs (one round, two jobs in opposite orders)")
+    if (args.jobs is not None and args.jobs < 1) or (args.rounds is not None and args.rounds < 1):
+        sys.exit("--jobs and --rounds must be >= 1")
+    if args.jobs and args.submit:
+        sys.exit("--jobs: submit the scripts by hand, e.g. in --dependency chains, to limit how many run at once")
     if args.run_tag and (args.stage not in ("map", "fingerprint", "determinism")
                          or not re.fullmatch(r"[A-Za-z0-9_-]+", args.run_tag) or re.fullmatch(r"rep\d+", args.run_tag)):
         sys.exit("--run-tag applies to map/fingerprint/determinism and must be a simple name other than rep<N>")
@@ -1380,18 +1403,25 @@ def main():
         determinism(conditions, args.reads, args.run_tag)
         return
     if args.stage == "timing":
-        if not args.only or not EXCLUDE_NODES:
-            sys.exit("timing needs --only (the conditions, in running order) and exclude_nodes in the config")
+        if not args.only or not (EXCLUDE_NODES or args.no_exclusive):
+            sys.exit("timing needs --only (the conditions, in running order) and, unless --no-exclusive, "
+                     "exclude_nodes in the config")
         by_name = {c["name"]: c for c in conditions}
         conditions = [by_name[name] for name in args.only]
         for c in conditions:
             check_index_params(c, "map", False)  # exits if the index is missing or stale
         for directory in (DATA_DIR / "jobs", DATA_DIR / "logs"):
             directory.mkdir(parents=True, exist_ok=True)
-        if not args.real:
-            script = DATA_DIR / "jobs" / f"timing_{Path(args.reads).stem}.sbatch"
-            script.write_text(timing_script(conditions, args.reads))
-            print(f"[{' -> '.join(args.only)}, rotated each round] x {TIMING_ROUNDS} rounds -> {script}")
+        if not args.real or args.sampled:
+            rounds = args.rounds or TIMING_ROUNDS
+            for k in range(args.jobs or 1):
+                variant = f"_job{k + 1}" if args.jobs else ""
+                script = DATA_DIR / "jobs" / f"timing_{reads_set_name(args.reads)}{variant}.sbatch"
+                script.write_text(timing_script(conditions, args.reads, real=args.real, variant=variant,
+                                                exclusive=not args.no_exclusive, rounds=rounds, offset=k,
+                                                sampled=args.sampled))
+                first = args.only[k % len(args.only):] + args.only[:k % len(args.only)]
+                print(f"[{' -> '.join(first)}, rotated each round] x {rounds} rounds -> {script}")
             if args.submit:
                 for _ in range(TIMING_JOBS):
                     submit(script, args)
