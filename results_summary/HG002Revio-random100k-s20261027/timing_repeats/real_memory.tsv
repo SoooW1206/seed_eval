@@ -1,0 +1,9 @@
+condition	runs	memory_gb_median	memory_gb_min	memory_gb_max
+minimax_k31w20	20	100.77	95.99	101.68
+mini_k31w10	20	68.20	64.65	70.83
+sync_k31s21	20	68.19	66.24	71.98
+miniW_k31w10	20	67.56	65.33	71.30
+mini_k31w20	20	45.77	43.93	49.80
+sync_k31s11	20	46.22	43.84	49.78
+miniW_k31w20	20	45.52	43.24	48.10
+default_k31w50W	20	33.34	31.36	37.39

@@ -1,0 +1,6 @@
+condition	against	jobs	reads	aligned_both	aligned_only_condition	aligned_only_against	different_start	higher_score_condition	higher_score_against	equal_score
+minimax_k31w20	mini_k31w10	10	1000000	993270	280	5010	18880	4620	11870	2390
+sync_k31s21	mini_k31w10	10	1000000	997230	550	1050	16020	6680	6690	2650
+miniW_k31w10	mini_k31w10	10	1000000	997240	220	1040	11540	4150	6300	1090
+sync_k31s11	mini_k31w20	10	1000000	999370	130	160	20640	9430	8710	2500
+miniW_k31w20	mini_k31w20	10	1000000	998920	50	610	17100	5670	10030	1400

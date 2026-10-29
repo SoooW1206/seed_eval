@@ -1,0 +1,5 @@
+set	positions_from	reads	aligned	mapq_0	mapq_1_29	mapq_30_59	mapq_60	score_median	score_q1	score_q3	identity_median	identity_q1	identity_q3	length_median	length_q1	length_q3	no_chm13_position	chm13_position	censat_ge50pct	censat_classes	sd_any	sd_ge50pct
+A_only_mini_k31w10	mini_k31w10	501	501	33	403	62	3	6353	5060	8166	0.9504	0.9238	0.9715	15228	12699	18313	6	495	495	hor:345,hsat2:87,hsat1A:38,hsat3:19,bsat:5,dhor:3	38	35
+all	mini_k31w10	100000	99828	147	9478	7773	82430	15068	12205	18505	0.9998	0.9994	0.9999	15670	12790	19273	334	99494	12530	ct:7036,hor:2275,hsat3:1149,hsat2:667,mon:568,censat:430	9441	6223
+B_only_minimax_k31w20	minimax_k31w20	28	28	0	17	11	0	5278	2829	6392	0.9287	0.9023	0.9540	15432	13862	16698	0	28	28	hor:17,hsat2:7,dhor:3,hsat3:3,mon:1	0	0
+all	minimax_k31w20	100000	99355	97	8717	7870	82671	15087	12234	18524	0.9998	0.9994	0.9999	15670	12790	19273	341	99014	12052	ct:7033,hor:1935,hsat3:1123,hsat2:577,mon:572,censat:425	9437	6219
