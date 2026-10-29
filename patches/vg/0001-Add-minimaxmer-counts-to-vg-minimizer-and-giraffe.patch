@@ -1,0 +1,268 @@
+From 016050140997107c9e6a2a78d635db31b75c7e95 Mon Sep 17 00:00:00 2001
+From: Sophia Tianxiang Wang <134022611+SoooW1206@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 19:46:16 -0700
+Subject: [PATCH] Add --minimaxmer-counts to vg minimizer and giraffe
+
+Minimaxmers are from Yoshi Suzuki's himapper_rp
+(https://github.com/yoshihikosuzuki/himapper_rp). vg minimizer
+--minimaxmer-counts FILE selects index minimizers by the counts (see
+gbwtgraph minimax.h) and stores the counts' fingerprint (k, entries,
+checksum) in the index tag "minimaxmer_counts"; the counts themselves
+are not stored. giraffe --minimaxmer-counts FILE loads the same counts
+for read minimizers. giraffe refuses an index whose tag does not match
+the given counts, or a minimaxmer index without counts. Loading logs
+k, the number of entries, the fingerprint and the time. Needs the
+gbwtgraph patch (patches/gbwtgraph/) applied to deps/gbwtgraph; this
+patch leaves the submodule pointer unchanged.
+---
+ src/gbwtgraph_helper.cpp          | 51 +++++++++++++++++++++++++++++++
+ src/gbwtgraph_helper.hpp          | 17 +++++++++++
+ src/subcommand/giraffe_main.cpp   | 20 ++++++++++++
+ src/subcommand/minimizer_main.cpp |  9 ++++++
+ 4 files changed, 97 insertions(+)
+
+diff --git a/src/gbwtgraph_helper.cpp b/src/gbwtgraph_helper.cpp
+index be32271ef..442a37b50 100644
+--- a/src/gbwtgraph_helper.cpp
++++ b/src/gbwtgraph_helper.cpp
+@@ -20,6 +20,7 @@ constexpr size_t MinimizerIndexParameters::ZIPCODE_PAYLOAD_SIZE;
+ 
+ // Other static members.
+ const std::string MinimizerIndexParameters::PAYLOAD_KEY = "payload";
++const std::string MinimizerIndexParameters::MINIMAXMER_KEY = "minimaxmer_counts";
+ 
+ //------------------------------------------------------------------------------
+ 
+@@ -334,6 +335,10 @@ std::string MinimizerIndexParameters::validate() const {
+         }
+     }
+ 
++    if (!this->minimaxmer_counts.empty() && (this->use_syncmers || this->use_weighted_minimizers)) {
++        return "minimaxmers cannot be used with syncmers or weighted minimizers";
++    }
++
+     if (this->use_weighted_minimizers) {
+         if (this->iterations > MAX_ITERATIONS) {
+             return "number of iterations must be at most " + std::to_string(MAX_ITERATIONS) + " when using weighted minimizers";
+@@ -583,6 +588,14 @@ gbwtgraph::DefaultMinimizerIndex build_minimizer_index(
+     }
+     index.set_tag(MinimizerIndexParameters::PAYLOAD_KEY, payload_str);
+ 
++    // Minimaxmers select by counts. Only the fingerprint of the counts goes into the index.
++    std::unique_ptr<gbwtgraph::MinimaxCounts> minimaxmer_counts;
++    if (!params.minimaxmer_counts.empty()) {
++        minimaxmer_counts = load_minimaxmer_counts(params.minimaxmer_counts);
++        index.set_tag(MinimizerIndexParameters::MINIMAXMER_KEY, minimaxmer_counts->fingerprint());
++        use_minimaxmer_counts(index, minimaxmer_counts.get());
++    }
++
+     // Build the index.
+     if (params.progress) {
+         auto s = logger.info() << "Building MinimizerIndex with k = " << index.k();
+@@ -630,9 +643,47 @@ gbwtgraph::DefaultMinimizerIndex build_minimizer_index(
+         logger.info() << "Construction time: " << seconds << " seconds" << std::endl;
+     }
+ 
++    // The counts are freed when we return.
++    index.set_minimaxmer_counts(nullptr);
+     return index;
+ }
+ 
++std::unique_ptr<gbwtgraph::MinimaxCounts> load_minimaxmer_counts(const std::string& filename) {
++    Logger logger("minimaxmer");
++    double start = gbwt::readTimer();
++    std::unique_ptr<gbwtgraph::MinimaxCounts> counts;
++    try {
++        counts.reset(new gbwtgraph::MinimaxCounts(filename));
++    } catch (const std::runtime_error& e) {
++        logger.error() << e.what() << std::endl;
++    }
++    logger.info() << "Loaded minimaxmer counts from " << filename << ": k = " << counts->k() << ", "
++                  << counts->size() << " entries, fingerprint " << counts->fingerprint() << ", "
++                  << (gbwt::readTimer() - start) << " seconds" << std::endl;
++    return counts;
++}
++
++void use_minimaxmer_counts(gbwtgraph::DefaultMinimizerIndex& index, const gbwtgraph::MinimaxCounts* counts) {
++    Logger logger("minimaxmer");
++    std::string tag = index.get_tag(MinimizerIndexParameters::MINIMAXMER_KEY);
++    if (counts == nullptr) {
++        if (!tag.empty()) {
++            logger.error() << "the minimizer index was built with minimaxmer counts (" << tag
++                           << "); give them with --minimaxmer-counts" << std::endl;
++        }
++        return;
++    }
++    if (tag != counts->fingerprint()) {
++        logger.error() << "minimaxmer counts (" << counts->fingerprint() << ") do not match the minimizer index ("
++                       << (tag.empty() ? "built without minimaxmer counts" : tag) << ")" << std::endl;
++    }
++    try {
++        index.set_minimaxmer_counts(counts);
++    } catch (const std::runtime_error& e) {
++        logger.error() << e.what() << std::endl;
++    }
++}
++
+ void require_payload(const gbwtgraph::DefaultMinimizerIndex& index, MinimizerIndexParameters::PayloadType expected_payload) {
+     std::string found = index.get_tag(MinimizerIndexParameters::PAYLOAD_KEY);
+     std::string expected_str = MinimizerIndexParameters::payload_str(expected_payload);
+diff --git a/src/gbwtgraph_helper.hpp b/src/gbwtgraph_helper.hpp
+index 3d3bfd395..335e63675 100644
+--- a/src/gbwtgraph_helper.hpp
++++ b/src/gbwtgraph_helper.hpp
+@@ -13,6 +13,7 @@
+ #include "snarl_distance_index.hpp"
+ #include "zip_code.hpp"
+ 
++#include <memory>
+ #include <vector>
+ #include <unordered_map>
+ 
+@@ -163,6 +164,9 @@ struct MinimizerIndexParameters {
+     /// Tag used to indicate the payload type in the minimizer index.
+     const static std::string PAYLOAD_KEY; // "payload"
+ 
++    /// Tag with the fingerprint of the minimaxmer counts the index was built with.
++    const static std::string MINIMAXMER_KEY; // "minimaxmer_counts"
++
+     /// k-mer length.
+     size_t k = gbwtgraph::DefaultMinimizerIndex::key_type::KMER_LENGTH;
+ 
+@@ -190,6 +194,10 @@ struct MinimizerIndexParameters {
+     /// Print progress information during construction.
+     bool progress = false;
+ 
++    /// Minimaxmer counts file from seed-eval's minimax_counts (empty: plain minimizers).
++    /// Minimaxmers are from Yoshi Suzuki's himapper_rp.
++    std::string minimaxmer_counts;
++
+     /// Sets minimizer parameters.
+     MinimizerIndexParameters& minimizers(size_t k, size_t w) {
+         this->k = k;
+@@ -251,6 +259,15 @@ gbwtgraph::DefaultMinimizerIndex build_minimizer_index(
+     bool require_path_payloads = false
+ );
+ 
++/// Loads minimaxmer counts and logs k, the number of entries, the fingerprint and the load time.
++/// Prints an error message and exits on failure.
++std::unique_ptr<gbwtgraph::MinimaxCounts> load_minimaxmer_counts(const std::string& filename);
++
++/// Checks the counts against tag "minimaxmer_counts" of the index and attaches them: an index built
++/// with counts needs the same counts (same fingerprint), and one built without needs none (nullptr).
++/// The counts must outlive the use of the index. Prints an error message and exits on failure.
++void use_minimaxmer_counts(gbwtgraph::DefaultMinimizerIndex& index, const gbwtgraph::MinimaxCounts* counts);
++
+ /// Checks that the minimizer index has the expected payload type.
+ ///
+ /// The check is based on tag "payload" stored in the index.
+diff --git a/src/subcommand/giraffe_main.cpp b/src/subcommand/giraffe_main.cpp
+index 905acdd7e..3ea80ec0c 100644
+--- a/src/subcommand/giraffe_main.cpp
++++ b/src/subcommand/giraffe_main.cpp
+@@ -711,6 +711,10 @@ void help_giraffe(char** argv, const BaseOptionGroup& parser, const std::map<std
+          << "      --num-haplotypes N        haplotypes candidates to sample (default: " << IndexingParameters::haplotype_sampling_num_haplotypes << ")" << endl
+          << "      --no-diploid-sampling     turn off downsampling candidates to best diploid" << endl;
+ 
++    cerr << "minimaxmers (Yoshi Suzuki's himapper_rp):" << endl
++         << "      --minimaxmer-counts FILE  counts the minimizer index was built with" << endl
++         << "                                (required for such an index)" << endl;
++
+     cerr << "alternate graphs:" << endl
+          << "  -x, --xg-name FILE            map to this graph (if no -Z / -g)," << endl
+          << "                                or use this graph for HTSLib output" << endl
+@@ -805,6 +809,7 @@ int main_giraffe(int argc, char** argv) {
+     constexpr int OPT_HAPLOTYPE_SAMPLING = 1104;
+     constexpr int OPT_NUM_HAPLOTYPES = 1105;
+     constexpr int OPT_NO_DIPLOID_SAMPLING = 1106;
++    constexpr int OPT_MINIMAXMER_COUNTS = 1107;
+ 
+     constexpr int OPT_TRACK_PROVENANCE = 1201;
+     constexpr int OPT_TRACK_CORRECTNESS = 1202;
+@@ -828,6 +833,9 @@ int main_giraffe(int argc, char** argv) {
+ 
+     // For haplotype sampling.
+     string kff_filename;
++
++    // Minimaxmer counts the minimizer index was built with.
++    string minimaxmer_counts_name;
+     bool haplotype_sampling_flag = false;
+     gbwtgraph::sample_name_set reference_samples;
+ 
+@@ -1152,6 +1160,7 @@ int main_giraffe(int argc, char** argv) {
+         {"haplotype-sampling", no_argument, 0, OPT_HAPLOTYPE_SAMPLING},
+         {"haplotype-name", required_argument, 0, OPT_HAPLOTYPE_NAME},
+         {"kff-name", required_argument, 0, OPT_KFF_NAME},
++        {"minimaxmer-counts", required_argument, 0, OPT_MINIMAXMER_COUNTS},
+         {"set-reference", required_argument, 0, OPT_SET_REFERENCE},
+         {"num-haplotypes", required_argument, 0, OPT_NUM_HAPLOTYPES},
+         {"no-diploid-sampling", no_argument, 0, OPT_NO_DIPLOID_SAMPLING},
+@@ -1283,6 +1292,10 @@ int main_giraffe(int argc, char** argv) {
+                 kff_filename = require_exists(logger, optarg);
+                 break;
+ 
++            case OPT_MINIMAXMER_COUNTS:
++                minimaxmer_counts_name = require_exists(logger, optarg);
++                break;
++
+             case OPT_SET_REFERENCE:
+                 reference_samples.insert(optarg);
+                 break;
+@@ -1824,6 +1837,13 @@ int main_giraffe(int argc, char** argv) {
+     }
+     minimizer_index = vg::io::VPKG::load_one<gbwtgraph::DefaultMinimizerIndex>(registry.require(minimizer_indexname).at(0));
+ 
++    // Minimaxmer counts must outlive the mapping. use_minimaxmer_counts() checks them against the index.
++    std::unique_ptr<gbwtgraph::MinimaxCounts> minimaxmer_counts;
++    if (!minimaxmer_counts_name.empty()) {
++        minimaxmer_counts = load_minimaxmer_counts(minimaxmer_counts_name);
++    }
++    use_minimaxmer_counts(*minimizer_index, minimaxmer_counts.get());
++
+     // Decide if we want to do recombination-aware mapping by default, based on whether we can.
+     
+     // Whether to use recombination-aware mapping if the user did not set the option.
+diff --git a/src/subcommand/minimizer_main.cpp b/src/subcommand/minimizer_main.cpp
+index 755c45dcf..15009cdc6 100644
+--- a/src/subcommand/minimizer_main.cpp
++++ b/src/subcommand/minimizer_main.cpp
+@@ -159,6 +159,10 @@ void help_minimizer(char** argv) {
+     std::cerr << "      --hash-table N         use 2^N-cell hash tables for kmer counting" << std::endl;
+     std::cerr << "                             (default: guess)" << std::endl;
+     std::cerr << std::endl;
++    std::cerr << "Minimaxmers (Yoshi Suzuki's himapper_rp):" << std::endl;
++    std::cerr << "      --minimaxmer-counts FILE  select by these counts (seed-eval minimax_counts);" << std::endl;
++    std::cerr << "                             giraffe needs the same file" << std::endl;
++    std::cerr << std::endl;
+     std::cerr << "Other options:" << std::endl;
+     std::cerr << "  -z, --zipcode-name FILE    store the distances that are too big in a file" << std::endl;
+     std::cerr << "                             if no -z, some distances may be discarded" << std::endl;
+@@ -185,6 +189,7 @@ MinimizerConfig::MinimizerConfig(int argc, char** argv, int max_threads, const L
+     constexpr int OPT_FAST_COUNTING = 1003;
+     constexpr int OPT_SAVE_MEMORY = 1004;
+     constexpr int OPT_HASH_TABLE = 1005;
++    constexpr int OPT_MINIMAXMER_COUNTS = 1006;
+     constexpr int OPT_NO_DIST = 1100;
+ 
+     int c;
+@@ -204,6 +209,7 @@ MinimizerConfig::MinimizerConfig(int argc, char** argv, int max_threads, const L
+             { "fast-counting", no_argument, 0, OPT_FAST_COUNTING },
+             { "save-memory", no_argument, 0, OPT_SAVE_MEMORY },
+             { "hash-table", required_argument, 0, OPT_HASH_TABLE },
++            { "minimaxmer-counts", required_argument, 0, OPT_MINIMAXMER_COUNTS },
+             { "zipcode-name", required_argument, 0, 'z' },
+             { "progress", no_argument, 0, 'p' },
+             { "threads", required_argument, 0, 't' },
+@@ -257,6 +263,9 @@ MinimizerConfig::MinimizerConfig(int argc, char** argv, int max_threads, const L
+         case OPT_HASH_TABLE:
+             this->params.hash_table_width = parse<size_t>(optarg);
+             break;
++        case OPT_MINIMAXMER_COUNTS:
++            this->params.minimaxmer_counts = optarg;
++            break;
+ 
+         case 'z':
+             this->zipcode_name = optarg;
+-- 
+2.34.1
+

@@ -482,6 +482,27 @@ file itself. They were made with
 | `reads_hist_genome1.tsv` | `reads_count` histogram of the k-mers with `genome_count` 1, from `python3 -I prototype/plot_reads_count.py hist PREFIX.mmc OUT.tsv` |
 | `reads_count_genome1.png` | that histogram, with the coverage and half of it marked: `python3 -I prototype/plot_reads_count.py plot reads_hist_genome1.tsv OUT.png --coverage 66` |
 
+## Minimaxmer patches for vg (`patches/`)
+
+`vg_minimax` is vg with two patches: `patches/vg/` against vg commit `c91cc1d91`
+(`vg minimizer` and `vg giraffe --minimaxmer-counts`), and `patches/gbwtgraph/` against
+GBWTGraph commit `7fac0af` (minimaxmer selection, `include/gbwtgraph/minimax.h`), which is
+the GBWTGraph commit vg `c91cc1d91` pins as its `deps/gbwtgraph` submodule. Each directory
+has the license of the project it patches (`LICENSE`). To build:
+
+```bash
+git clone https://github.com/vgteam/vg.git vg_minimax && cd vg_minimax
+git checkout c91cc1d91
+git submodule update --init --recursive        # deps/gbwtgraph is now at 7fac0af
+git apply /path/to/seed-eval/patches/vg/0001-*.patch
+git -C deps/gbwtgraph apply /path/to/seed-eval/patches/gbwtgraph/0001-*.patch
+make -j 16                                     # vg's own build instructions apply (see vg's README)
+```
+
+`git am` instead of `git apply` keeps the patches' commit messages. The vg patch leaves the
+submodule pointer unchanged, so `git status` in the vg checkout shows `deps/gbwtgraph` as
+modified. The counts file is written by `prototype/minimax_counts.cpp` (see "Count table").
+
 ## Safeguards
 
 - **Index provenance.** Each index job writes `indexes/<name>.params` (vg binary and

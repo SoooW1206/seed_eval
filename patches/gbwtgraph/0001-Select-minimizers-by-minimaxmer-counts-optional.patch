@@ -1,0 +1,338 @@
+From c8552dd9d6c41afdf5641ab0a1a9e8b55cc5eb94 Mon Sep 17 00:00:00 2001
+From: Sophia Tianxiang Wang <134022611+SoooW1206@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 19:31:43 -0700
+Subject: [PATCH] Select minimizers by minimaxmer counts (optional)
+
+Minimaxmers are from Yoshi Suzuki's himapper_rp
+(https://github.com/yoshihikosuzuki/himapper_rp): in each window, pick
+the k-mer with the fewest occurrences in the genome, then the most
+occurrences in the reads, then the smallest hash.
+
+minimax.h loads a counts file (canonical 31-mer -> genome_count,
+reads_count) written by seed-eval's minimax_counts and gives each
+candidate an order value [genome:16][65535 - reads:16][hash >> 32].
+MinimizerIndex::set_minimaxmer_counts() makes the window buffer order
+k-mers by these values; k-mers not in the counts are not candidates.
+Only the selection changes: selected minimizers carry the key's own
+hash, so the hash table and the file format are those of a plain index.
+The counts are not owned or serialized. Syncmers, frequent k-mers and
+keys other than Key64 are refused.
+---
+ include/gbwtgraph/minimax.h   | 138 ++++++++++++++++++++++++++++++++++
+ include/gbwtgraph/minimizer.h |  79 ++++++++++++++++++-
+ 2 files changed, 216 insertions(+), 1 deletion(-)
+ create mode 100644 include/gbwtgraph/minimax.h
+
+diff --git a/include/gbwtgraph/minimax.h b/include/gbwtgraph/minimax.h
+new file mode 100644
+index 0000000..60b4cfd
+--- /dev/null
++++ b/include/gbwtgraph/minimax.h
+@@ -0,0 +1,138 @@
++#ifndef GBWTGRAPH_MINIMAX_H
++#define GBWTGRAPH_MINIMAX_H
++
++#include <algorithm>
++#include <cstdint>
++#include <fstream>
++#include <limits>
++#include <sstream>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++/*
++  minimax.h: k-mer counts for minimaxmer selection.
++
++  Minimaxmers are from Yoshi Suzuki's himapper_rp (https://github.com/yoshihikosuzuki/himapper_rp):
++  in each window, pick the k-mer with the fewest occurrences in the genome, then the most
++  occurrences in the reads, then the smallest hash. Here the genome is the graph: genome_count is
++  the number of distinct graph positions of the k-mer, the count that weighted minimizers threshold on.
++  K-mers that are not in the graph are not candidates.
++
++  The counts file is written by seed-eval's prototype/minimax_counts.cpp:
++  "MMXCNT01", uint64 k, uint64 n, n uint64 canonical keys in sorted order, n uint32 values
++  (genome_count << 16 | reads_count); little-endian. A canonical key is the smaller 2-bit key of
++  the two strands.
++*/
++
++namespace gbwtgraph
++{
++
++//------------------------------------------------------------------------------
++
++class MinimaxCounts
++{
++public:
++  // genome_count is capped one below the 16-bit maximum, as in seed-eval's Python prototype, so that
++  // the two order k-mers identically.
++  constexpr static std::uint64_t GENOME_COUNT_MAX = 0xFFFE;
++  constexpr static std::uint64_t READS_COUNT_MAX = 0xFFFF;
++  // Bits of the key used for the bucket directory.
++  constexpr static size_t BUCKET_BITS = 28;
++
++  MinimaxCounts() = default;
++
++  // Loads the counts file. Throws std::runtime_error if the file cannot be read or is invalid.
++  explicit MinimaxCounts(const std::string& filename)
++  {
++    std::ifstream in(filename, std::ios::binary);
++    if(!in) { throw std::runtime_error("MinimaxCounts: cannot open " + filename); }
++    char magic[8];
++    std::uint64_t k = 0, n = 0;
++    in.read(magic, sizeof(magic));
++    in.read(reinterpret_cast<char*>(&k), sizeof(k));
++    in.read(reinterpret_cast<char*>(&n), sizeof(n));
++    if(!in || std::string(magic, sizeof(magic)) != "MMXCNT01")
++    {
++      throw std::runtime_error("MinimaxCounts: " + filename + " is not a minimaxmer counts file");
++    }
++    if(k == 0 || k > 31) { throw std::runtime_error("MinimaxCounts: invalid k " + std::to_string(k) + " in " + filename); }
++    this->kmer_length = k;
++    this->keys.resize(n);
++    this->values.resize(n);
++    in.read(reinterpret_cast<char*>(this->keys.data()), n * sizeof(std::uint64_t));
++    in.read(reinterpret_cast<char*>(this->values.data()), n * sizeof(std::uint32_t));
++    if(!in || in.peek() != std::ifstream::traits_type::eof())
++    {
++      throw std::runtime_error("MinimaxCounts: " + filename + " has the wrong size for " + std::to_string(n) + " entries");
++    }
++
++    // Check the order, build the bucket directory, and compute a checksum for the fingerprint.
++    size_t key_bits = 2 * k;
++    this->shift = (key_bits > BUCKET_BITS ? key_bits - BUCKET_BITS : 0);
++    this->bucket_start.assign((std::uint64_t(1) << (key_bits - this->shift)) + 1, 0);
++    std::uint64_t checksum = 0xcbf29ce484222325ULL;
++    for(size_t i = 0; i < n; i++)
++    {
++      if(i > 0 && this->keys[i] <= this->keys[i - 1])
++      {
++        throw std::runtime_error("MinimaxCounts: keys in " + filename + " are not sorted and unique");
++      }
++      this->bucket_start[(this->keys[i] >> this->shift) + 1]++;
++      checksum = (checksum ^ this->keys[i]) * 0x100000001b3ULL;
++      checksum = (checksum ^ this->values[i]) * 0x100000001b3ULL;
++    }
++    for(size_t b = 1; b < this->bucket_start.size(); b++) { this->bucket_start[b] += this->bucket_start[b - 1]; }
++
++    std::ostringstream fingerprint;
++    fingerprint << "k=" << k << ";n=" << n << ";fnv1a=" << std::hex << checksum;
++    this->print = fingerprint.str();
++  }
++
++  size_t k() const { return this->kmer_length; }
++  size_t size() const { return this->keys.size(); }
++
++  // k, number of entries and a checksum of the contents.
++  const std::string& fingerprint() const { return this->print; }
++
++  // Finds the packed counts (genome_count << 16 | reads_count) of a canonical key.
++  bool find(std::uint64_t canonical_key, std::uint32_t& packed) const
++  {
++    size_t bucket = canonical_key >> this->shift;
++    if(bucket + 1 >= this->bucket_start.size()) { return false; }
++    auto first = this->keys.begin() + this->bucket_start[bucket];
++    auto last = this->keys.begin() + this->bucket_start[bucket + 1];
++    auto iter = std::lower_bound(first, last, canonical_key);
++    if(iter == last || *iter != canonical_key) { return false; }
++    packed = this->values[iter - this->keys.begin()];
++    return true;
++  }
++
++  /*
++    Order value of a candidate: [genome_count:16][65535 - reads_count:16][hash >> 32], smaller is
++    better. The high 32 bits of the hash break ties in the same order as the full hash, so with
++    constant counts this is the plain minimizer order. Used for selection only: the low bits of a
++    selected k-mer's order value are biased towards small values (it won its window), so they must
++    not choose hash table cells; the index uses the key's own hash for that.
++  */
++  static size_t order(std::uint32_t packed, size_t hash)
++  {
++    std::uint64_t genome = std::min<std::uint64_t>(packed >> 16, GENOME_COUNT_MAX);
++    std::uint64_t reads = std::min<std::uint64_t>(packed & 0xFFFF, READS_COUNT_MAX);
++    return (genome << 48) | ((READS_COUNT_MAX - reads) << 32) | (hash >> 32);
++  }
++
++private:
++  size_t kmer_length = 0;
++  size_t shift = 0;
++  std::vector<std::uint64_t> keys;
++  std::vector<std::uint32_t> values;
++  std::vector<std::uint64_t> bucket_start;
++  std::string print;
++};
++
++//------------------------------------------------------------------------------
++
++} // namespace gbwtgraph
++
++#endif // GBWTGRAPH_MINIMAX_H
+diff --git a/include/gbwtgraph/minimizer.h b/include/gbwtgraph/minimizer.h
+index 87dca49..4f461f8 100644
+--- a/include/gbwtgraph/minimizer.h
++++ b/include/gbwtgraph/minimizer.h
+@@ -14,6 +14,7 @@
+ #include <gbwt/utils.h>
+ 
+ #include <gbwtgraph/io.h>
++#include <gbwtgraph/minimax.h>
+ #include <gbwtgraph/utils.h>
+ 
+ /*
+@@ -570,6 +571,7 @@ public:
+     this->hash_table.swap(another.hash_table);
+     std::swap(this->downweight, another.downweight);
+     this->frequent_kmers.swap(another.frequent_kmers);
++    std::swap(this->minimax, another.minimax);
+   }
+ 
+   KmerIndex& operator=(const KmerIndex& source)
+@@ -590,6 +592,7 @@ public:
+       this->hash_table = std::move(source.hash_table);
+       this->downweight = std::move(source.downweight);
+       this->frequent_kmers = std::move(source.frequent_kmers);
++      this->minimax = source.minimax;
+     }
+     return *this;
+   }
+@@ -639,6 +642,24 @@ public:
+   // Is the index empty?
+   bool empty() const { return (this->size() == 0); }
+ 
++  // Are minimizers selected by minimaxmer order values? Cells are still chosen by key.hash().
++  bool uses_minimaxmers() const { return (this->minimax != nullptr); }
++
++  // Minimaxmer order values of a k-mer in both orientations. Returns false if the k-mer is not
++  // a candidate (not in the counts). Requires uses_minimaxmers().
++  bool minimaxmer_hashes(key_type forward_key, key_type reverse_key, size_t& forward_hash, size_t& reverse_hash) const
++  {
++    if constexpr(std::is_same<KeyType, Key64>::value)
++    {
++      std::uint32_t packed = 0;
++      if(!this->minimax->find(std::min(forward_key.get_key(), reverse_key.get_key()), packed)) { return false; }
++      forward_hash = MinimaxCounts::order(packed, forward_key.hash());
++      reverse_hash = MinimaxCounts::order(packed, reverse_key.hash());
++      return true;
++    }
++    else { return false; }
++  }
++
+   // Number of values (kmer occurrences) in the index.
+   size_t number_of_values() const { return this->values; }
+ 
+@@ -850,6 +871,9 @@ private:
+   size_t downweight;
+   std::vector<key_type> frequent_kmers;
+ 
++  // Minimaxmer counts, if minimizers are selected by minimaxmer order values. Not owned and not serialized.
++  const MinimaxCounts* minimax = nullptr;
++
+   // Needed for serialization.
+   friend class MinimizerHeader;
+   friend class MinimizerIndex<KeyType>;
+@@ -917,6 +941,7 @@ private:
+ 
+     this->downweight = source.downweight;
+     this->frequent_kmers = source.frequent_kmers;
++    this->minimax = source.minimax;
+   }
+ 
+   // Clears the value stored in the given cell.
+@@ -1646,7 +1671,16 @@ public:
+     void advance(offset_type pos, key_type forward_key, key_type reverse_key)
+     {
+       if(!(this->empty()) && this->front().offset + this->w <= pos) { this->head++; }
+-      size_t forward_hash = this->parent.hash(forward_key), reverse_hash = this->parent.hash(reverse_key);
++      size_t forward_hash = 0, reverse_hash = 0;
++      if(this->parent.uses_minimaxmers())
++      {
++        // Minimaxmers: a k-mer that is not in the counts is not a candidate.
++        if(!this->parent.minimaxmer_hashes(forward_key, reverse_key, forward_hash, reverse_hash)) { return; }
++      }
++      else
++      {
++        forward_hash = this->parent.hash(forward_key); reverse_hash = this->parent.hash(reverse_key);
++      }
+       size_t hash = std::min(forward_hash, reverse_hash);
+       while(!(this->empty()) && this->back().hash > hash) { this->tail--; }
+       this->tail++;
+@@ -1720,9 +1754,11 @@ public:
+ 
+     // It was more convenient to use the first offset of the kmer, regardless of the orientation.
+     // If the minimizer is a reverse complement, we must return the last offset instead.
++    // Minimaxmers were selected by order values; the hash table uses the key's own hash.
+     for(minimizer_type& minimizer : result)
+     {
+       if(minimizer.is_reverse) { minimizer.offset += this->k() - 1; }
++      if(this->uses_minimaxmers()) { minimizer.hash = minimizer.key.hash(); }
+     }
+     std::sort(result.begin(), result.end());
+ 
+@@ -1853,9 +1889,11 @@ public:
+ 
+     // It was more convenient to use the first offset of the kmer, regardless of the orientation.
+     // If the minimizer is a reverse complement, we must return the last offset instead.
++    // Minimaxmers were selected by order values; the hash table uses the key's own hash.
+     for(auto& record : result)
+     {
+       if(std::get<0>(record).is_reverse) { std::get<0>(record).offset += this->k() - 1; }
++      if(this->uses_minimaxmers()) { std::get<0>(record).hash = std::get<0>(record).key.hash(); }
+     }
+     std::sort(result.begin(), result.end());
+ 
+@@ -1979,6 +2017,10 @@ public:
+     {
+       throw std::runtime_error("MinimizerIndex::add_frequent_kmers(): Cannot use frequent kmers with syncmers");
+     }
++    if(this->uses_minimaxmers())
++    {
++      throw std::runtime_error("MinimizerIndex::add_frequent_kmers(): Cannot use frequent kmers with minimaxmers");
++    }
+     size_t max_iterations = MinimizerHeader::FLAG_WEIGHT_MASK >> MinimizerHeader::FLAG_WEIGHT_OFFSET;
+     if(iterations > max_iterations)
+     {
+@@ -2005,6 +2047,41 @@ public:
+     this->header.set_int(MinimizerHeader::FLAG_WEIGHT_MASK, MinimizerHeader::FLAG_WEIGHT_OFFSET, iterations);
+   }
+ 
++  /*
++    Selects minimizers by minimaxmer order values from the given counts instead of hashes
++    (minimaxmers: Yoshi Suzuki's himapper_rp). Only the selection changes: the selected
++    minimizers carry the key's own hash, which chooses the hash table cell as in a plain index.
++    The counts are not owned or serialized: the same counts must be set when building the index
++    and every time it is used. nullptr clears them.
++
++    Throws std::runtime_error if the key type is not Key64, the index uses syncmers or frequent
++    kmers, or k differs from the counts.
++  */
++  void set_minimaxmer_counts(const MinimaxCounts* counts)
++  {
++    if(counts == nullptr) { this->index.minimax = nullptr; return; }
++    if(!std::is_same<KeyType, Key64>::value)
++    {
++      throw std::runtime_error("MinimizerIndex::set_minimaxmer_counts(): Minimaxmers require 64-bit keys");
++    }
++    if(this->uses_syncmers())
++    {
++      throw std::runtime_error("MinimizerIndex::set_minimaxmer_counts(): Cannot use minimaxmers with syncmers");
++    }
++    if(!this->index.frequent_kmers.empty())
++    {
++      throw std::runtime_error("MinimizerIndex::set_minimaxmer_counts(): Cannot use minimaxmers with frequent kmers");
++    }
++    if(counts->k() != this->k())
++    {
++      throw std::runtime_error("MinimizerIndex::set_minimaxmer_counts(): Counts have k = " + std::to_string(counts->k()) + ", index has k = " + std::to_string(this->k()));
++    }
++    this->index.minimax = counts;
++  }
++
++  // Are minimizers selected by minimaxmer order values?
++  bool uses_minimaxmers() const { return this->index.uses_minimaxmers(); }
++
+   /*
+     Inserts the value into the index, using minimizer.key as the key and
+     minimizer.hash as its hash. Does not insert keys equal to key_type::no_key()
+-- 
+2.34.1
+
