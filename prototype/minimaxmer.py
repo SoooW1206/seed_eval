@@ -6,7 +6,12 @@ A minimaxmer is chosen like a minimizer, but each k-mer is ranked by the key
 instead of by its hash alone: prefer k-mers that are rare in the genome, then
 k-mers that are common in the reads. Step 1 selects the minimum of every window
 of w consecutive k-mers; step 2 counts how many windows each selected k-mer won.
-Yoshi's step 3 (uniformly sparse thinning) is not implemented.
+Yoshi's step 3 (uniformly sparse thinning) is not in vg_minimax; here it is optional (--rspace).
+
+window_orientation, robust_window_counts and sparse_thinning (steps 2-3 as in Yoshi's code) are
+translated from himapper_rp's minimaxmer.c (https://github.com/yoshihikosuzuki/himapper_rp, commit
+2d4e0fa) and are covered by its BSD license notice, prototype/LICENSE.himapper_rp. The rest of this
+file follows vg_minimax.
 
 Everything follows vg_minimax (gbwtgraph minimizer.h and minimax.h on the minimaxmer
 branch), so the two can be compared read by read:
@@ -153,7 +158,9 @@ BALANCE = {"A": -1, "C": -1, "G": 1, "T": 1, "a": -1, "c": -1, "g": 1, "t": 1}
 
 
 def window_orientation(seq, start, span):
-    """Yoshi's D(W) = #G + #T - #A - #C over seq[start:start+span]: >0 means traverse right-to-left,
+    """Translated from himapper_rp's minimaxmer.c (commit 2d4e0fa), exact_window_orientation; covered by its BSD license
+    notice, prototype/LICENSE.himapper_rp.
+    Yoshi's D(W) = #G + #T - #A - #C over seq[start:start+span]: >0 means traverse right-to-left,
     <0 left-to-right. For D == 0 (even spans), compare the window with its reverse complement base by
     base (exact_window_orientation); 0 means the window is its own reverse complement."""
     d = sum(BALANCE.get(c, 0) for c in seq[start:start + span])
@@ -168,7 +175,9 @@ def window_orientation(seq, start, span):
 
 
 def robust_window_counts(seq, k, w, keys):
-    """Step 2 as in Yoshi's minimaxmer.c (count_canonical_robust_minima, default build): every window of w
+    """Translated from himapper_rp's minimaxmer.c (commit 2d4e0fa), count_canonical_robust_minima; covered by its BSD license
+    notice, prototype/LICENSE.himapper_rp.
+    Step 2 as in Yoshi's minimaxmer.c (count_canonical_robust_minima, default build): every window of w
     k-mers has one winner. A unique minimum wins. Among tied minima, D(W) orients the run of tied windows:
     D < 0 goes left to right, keeping the previous winner while it is still a minimum of the window and
     otherwise taking the rightmost minimum; D > 0 mirrors this right to left with the leftmost minimum; a
@@ -249,7 +258,9 @@ def robust_window_counts(seq, k, w, keys):
 
 
 def sparse_thinning(keys, nw, rspace):
-    """Step 3 as in Yoshi's minimaxmer.c (canonical thinning, default build): candidates are the positions
+    """Translated from himapper_rp's minimaxmer.c (commit 2d4e0fa), the thinning in find_seeds; covered by its BSD license
+    notice, prototype/LICENSE.himapper_rp.
+    Step 3 as in Yoshi's minimaxmer.c (canonical thinning, default build): candidates are the positions
     that won a window, sorted by (windows won descending, key ascending), i.e. (NW desc, genome_count asc,
     reads_count desc, hash asc). Within a group of equal (NW, key), positions are taken in pairs from both
     ends: both are accepted if at least rspace apart, otherwise neither, and the pair moves inward past

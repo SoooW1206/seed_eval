@@ -592,3 +592,27 @@ modified. The counts file is written by `prototype/minimax_counts.cpp` (see "Cou
   not in HG002's copy. On the simulated reads, the extra unaligned reads are almost all
   reads without a truth position on CHM13, so accuracy is not affected. Tables:
   `results_summary/HG002Revio-random100k-s20261027/unaligned_reads/`.
+
+## Acknowledgments
+
+- Minimaxmers were proposed by Yoshihiko Suzuki
+  ([himapper_rp](https://github.com/yoshihikosuzuki/himapper_rp)). The vg Giraffe
+  implementation (`patches/`) was written following the method description and source of
+  himapper_rp (commit 2d4e0fa) without copying code; the Python prototype's step-2/3
+  functions (`prototype/minimaxmer.py`) are translated from himapper_rp's `minimaxmer.c` and
+  carry its BSD license notice (`prototype/LICENSE.himapper_rp`). Step 3 (sparse thinning) is
+  not implemented in vg.
+- vg ([vgteam/vg](https://github.com/vgteam/vg)) and GBWTGraph
+  ([jltsiren/gbwtgraph](https://github.com/jltsiren/gbwtgraph)) are MIT-licensed; the patches
+  are against vg commit `c91cc1d91` and GBWTGraph commit `7fac0af`.
+- k-mers in the reads were counted with [KMC](https://github.com/refresh-bio/KMC).
+- The evaluation follows the conventions of the Paten lab's long-read Giraffe experiments
+  (read sets, `gamcompare` scoring, the precision-recall plot of `plot-pr.R`).
+
+## License
+
+seed-eval is released under the MIT license (`LICENSE`). Two parts follow other licenses:
+`window_orientation`, `robust_window_counts` and `sparse_thinning` in `prototype/minimaxmer.py`
+are translated from himapper_rp and follow its BSD license notice
+(`prototype/LICENSE.himapper_rp`); the patches in `patches/` follow the MIT licenses of vg and
+GBWTGraph (`patches/vg/LICENSE`, `patches/gbwtgraph/LICENSE`).
