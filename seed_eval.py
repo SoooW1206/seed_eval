@@ -461,10 +461,12 @@ def timing_script(conditions, reads, real=False, variant="", exclusive=True, rou
     a per-read fingerprint and MAPQ/identity statistics are written, and the job ends with placement.tsv.
     sampled (with real): a sampled real-read FASTQ, mapped with the settings of simulated reads (THREADS
     threads, the rounds, map memory) and with real's fingerprints, statistics and placement.tsv.
-    exclusive=False: no --exclusive and no --exclude, for many repeated jobs on shared nodes.
+    exclusive=False: no --exclusive and no --exclude, for many repeated jobs on shared nodes; their runs go to
+    results/<reads>/timing_repeats_runs/ instead of timing/, which collect reads.
     rounds: rounds per job instead of TIMING_ROUNDS (full real reads: 1)."""
     reads_set = reads_set_name(reads)
-    t = DATA_DIR / "results" / reads_set / "timing" / "job$SLURM_JOB_ID"
+    # Shared-node runs go apart from the exclusive ones, so collect's timing tables never mix the two
+    t = DATA_DIR / "results" / reads_set / ("timing" if exclusive else "timing_repeats_runs") / "job$SLURM_JOB_ID"
     log = DATA_DIR / "logs" / f"timing_{reads_set}{variant}.%j.log"
     pinned = f"#SBATCH --exclusive\n#SBATCH --exclude={EXCLUDE_NODES}\n" if exclusive else ""
     columns, rounds, threads = TIMING_COLUMNS + (REAL_COLUMNS if real else []), rounds or TIMING_ROUNDS, THREADS
@@ -1091,11 +1093,14 @@ def plot_comparison(rows, path, reads_set, tests=()):
     x = range(len(rows))
     labelled = len(rows) <= MAX_LABELLED_CONDITIONS
 
-    # The seeds panel needs this read set's density runs; leave it out if none exist.
+    # The seeds panels need this read set's density runs; leave them out if none exist. No speed panel:
+    # speeds are compared with the repeated timing runs (prototype/timing_repeats.py), not single map runs.
     has_seeds = any(r.get("seeds_per_read_median") is not None for r in rows)
-    panels = 4 if has_seeds else 2
-    fig, axes = plt.subplots(1, panels, figsize=(panels * max(5, 0.55 * len(rows) + 1.5), 5.2))
-    ax_err, ax_speed = axes[0], axes[1]
+    panels = 3 if has_seeds else 1
+    # At least 12 inches wide, so the legend (top right) clears the read set name (top left) with one panel.
+    fig, axes = plt.subplots(1, panels, figsize=(max(12, panels * max(5, 0.55 * len(rows) + 1.5)), 5.2), squeeze=False)
+    axes = axes[0]
+    ax_err = axes[0]
     error = [100 * r["wrong"] / r["eligible"] for r in rows]
     ax_err.bar(x, error, color=colors, width=0.6)
     # No error bars: conditions map the same reads, so differences are judged by the paired test.
@@ -1118,21 +1123,9 @@ def plot_comparison(rows, path, reads_set, tests=()):
     ax_err.set_title(title, fontsize=10, color=ink, loc="left")
     ax_err.set_ylim(0, max(error) * (1.6 if labelled else 1.15))
 
-    speed = [r["reads_per_sec_per_thread"] or 0 for r in rows]
-    ax_speed.bar(x, speed, color=colors, width=0.6)
-    for i, s in zip(x, speed):
-        if labelled:
-            ax_speed.annotate(f"{s:.1f}", (i, s), xytext=(0, 4), textcoords="offset points",
-                              ha="center", fontsize=9, color=ink)
-    speed_title = "Mapping speed (reads / s / thread, median of reps)"
-    if max(r.get("reps") or 0 for r in rows) <= 1:
-        speed_title = "Mapping speed (reads / s / thread)\n(single run, not for comparison)"
-    ax_speed.set_title(speed_title, fontsize=11, color=ink, loc="left")
-    ax_speed.set_ylim(0, 1.15 * max(speed))
-
     if has_seeds:
         # Solid bar: median seeds per read; light bar: mean (pulled up by a few repetitive reads).
-        ax_seeds = axes[2]
+        ax_seeds = axes[1]
         width = 0.38
         for i, r in zip(x, rows):
             for offset, stat, alpha in ((-width / 2, "median", 1.0), (width / 2, "mean", 0.4)):
@@ -1151,7 +1144,7 @@ def plot_comparison(rows, path, reads_set, tests=()):
 
         # The high end gets its own panel: p99 and the maximum are one to two orders of magnitude above the
         # median and would flatten the panel above. Bar: p99; number above it: the maximum (one read, noisy).
-        ax_high = axes[3]
+        ax_high = axes[2]
         for i, r in zip(x, rows):
             p99, top_read = r.get("seeds_per_read_p99"), r.get("seeds_per_read_max")
             if p99 is None:
@@ -1259,12 +1252,17 @@ def collect(conditions, reads, snapshot=False):
     for name in ("runs.tsv", "placement.tsv"):
         concat_tables(sorted((out_dir / "timing").glob(f"job*/{name}")), out_dir / TIMING_TABLES[name])
     table = out_dir / "results.tsv"
-    with open(table, "w", newline="") as f:
-        writer = csv.writer(f, delimiter="\t")
-        writer.writerow(RESULT_COLUMNS)
-        for row in rows:
-            writer.writerow([format_value(row.get(col)) for col in RESULT_COLUMNS])
-    print(f"wrote {table} ({len(rows)} conditions)")
+    if not rows:   # e.g. a real-read set with timing runs only: no empty tables to snapshot
+        for name in ("results.tsv", "mcnemar.tsv"):
+            (out_dir / name).unlink(missing_ok=True)
+        print(f"no map results for {reads_set}: results.tsv and mcnemar.tsv not written (timing tables only)")
+    else:
+        with open(table, "w", newline="") as f:
+            writer = csv.writer(f, delimiter="\t")
+            writer.writerow(RESULT_COLUMNS)
+            for row in rows:
+                writer.writerow([format_value(row.get(col)) for col in RESULT_COLUMNS])
+        print(f"wrote {table} ({len(rows)} conditions)")
     if skipped:
         print(f"skipped (no map results for {reads_set}): {[r['name'] for r in skipped]}")
     no_density = [r["name"] for r in rows if r.get("seeds_per_read_median") is None]
@@ -1275,8 +1273,8 @@ def collect(conditions, reads, snapshot=False):
     if inconsistent:
         print(f"WARNING: replicates disagree on the number of correct reads: {inconsistent}")
     tests = mcnemar_table(rows, reads_set) if rows else []
-    write_table(out_dir / "mcnemar.tsv", MCNEMAR_COLUMNS, tests)
     if rows:
+        write_table(out_dir / "mcnemar.tsv", MCNEMAR_COLUMNS, tests)
         plot = out_dir / "comparison.png"
         plot_comparison(rows, plot, reads_set, tests)
         print(f"wrote {plot}")

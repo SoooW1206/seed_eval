@@ -161,7 +161,7 @@ the `sbatch` command line; the generated scripts do not change.
 | collect | `python3 seed_eval.py collect --reads GAM [--snapshot]` | runs locally: `results/<reads>/results.tsv`, `mcnemar.tsv`, `comparison.png`, `density_sweep.png`; `--snapshot` copies them and the filter/minimizer summaries to `results_summary/<reads>/` |
 | fingerprint | `python3 seed_eval.py fingerprint --reads GAM [--run-tag TAG] --submit` | one job per run that has a `mapped.gam` (`<name>/rep*`, or `<name>/TAG/rep*`): `fingerprint.tsv` in the run directory |
 | determinism | `python3 seed_eval.py determinism --reads GAM --run-tag TAG` | runs locally: `results/<reads>/determinism/summary.tsv`, `reads.tsv` |
-| timing | `python3 seed_eval.py timing --reads GAM --only A B C REF [--real [--sampled]] [--no-exclusive] [--jobs N] [--rounds R] --submit` | one exclusive job, submitted twice (`--real`: two jobs in opposite orders; `--jobs N`: N scripts, submitted by hand): `results/<reads>/timing/job<ID>/runs.tsv`, `run_info.tsv`, per run `round<r>_<name>/giraffe.log`, `giraffe.time` (`--real`: also `fingerprint.tsv`, statistics, `placement.tsv`) |
+| timing | `python3 seed_eval.py timing --reads GAM --only A B C REF [--real [--sampled]] [--no-exclusive] [--jobs N] [--rounds R] --submit` | one exclusive job, submitted twice (`--real`: two jobs in opposite orders; `--jobs N`: N scripts, submitted by hand): `results/<reads>/timing/job<ID>/runs.tsv` (`--no-exclusive`: `timing_repeats_runs/job<ID>/`), `run_info.tsv`, per run `round<r>_<name>/giraffe.log`, `giraffe.time` (`--real`: also `fingerprint.tsv`, statistics, `placement.tsv`) |
 
 What each job runs:
 
@@ -223,7 +223,8 @@ What each job runs:
   hand in `--dependency=afterany` chains to limit how many run at once. Without these
   options the generated scripts are unchanged. On shared nodes wall-clock times depend on
   the neighbours, so only ratios within a job are compared, over many jobs
-  (`prototype/timing_repeats.py`).
+  (`prototype/timing_repeats.py`). These jobs write to `results/<reads>/timing_repeats_runs/`,
+  not `timing/`, so `collect`'s timing tables hold the exclusive jobs only.
 - **timing --real --sampled**: `--reads` is a sample of real reads (e.g. 100k from
   `prototype/sample_fastq.py`), mapped like simulated reads (16 threads, the rotated
   rounds, map memory, partition `medium`) with `--real`'s fingerprints, statistics and
@@ -281,7 +282,7 @@ truth, so its `results.tsv` and `mcnemar.tsv` are empty.
 ### Plots
 
 `comparison.png` has one bar per condition: mismapped reads as % of reads with a truth
-position on CHM13 (`eligible`), mapping speed, and seed hits per read (graph positions)
+position on CHM13 (`eligible`) and seed hits per read (graph positions)
 on the same read set (solid bar: median, light bar: mean). There are no error bars on
 accuracy: every condition maps the same reads, so differences are judged with the
 paired test in `mcnemar.tsv`. With at most 6 conditions each bar is labelled
@@ -290,10 +291,10 @@ against the reference with its Bonferroni-corrected p, e.g. `−12 wrong vs ref 
 (negative: fewer mismapped reads than the reference); with more conditions the bars
 carry no labels. Conditions are grouped by method (`label`), densest first within a
 method, with the `reference` group last; each method has its own color and the
-reference is gray. If the read set has no replicates, the speed panel is titled
-"single run, not for comparison". Seed columns are only filled from a density run on
+reference is gray. There is no speed panel: speeds are compared with the repeated timing
+runs (see "Note on speed"); `results.tsv` keeps the single-run speed columns for reference. Seed columns are only filled from a density run on
 the same read set; without one they are `NA`, and if no condition has one the seeds
-panel is left out. A fourth panel shows the high end of seeds per read: a bar for the
+panels are left out. A third panel shows the high end of seeds per read: a bar for the
 99th percentile and the maximum as a number above it (vertical when the bars carry no
 other labels). It is a separate panel because p99 and the maximum are one to two orders
 of magnitude above the median and would flatten the median and mean bars.
@@ -329,9 +330,13 @@ items passing and failing; the `minimizer` stage filters act on minimizers.
 
 ### Note on speed
 
-Mapping speed depends on how busy the compute node is, so it can vary between runs.
-Use replicates (`--reps`) on a large read set and treat small differences with caution.
-For comparisons, use the `timing` stage, which keeps all conditions on one reserved node per job.
+Mapping speed depends on how busy the compute node is, so it varies between runs. Speed
+comparisons are taken from the repeated timing runs (`timing --no-exclusive --jobs N`,
+summarised by `prototype/timing_repeats.py`: ratios within each job against the
+density-matched minimizer, distributed over jobs). The speed columns of `results.tsv`
+(`reads_per_sec_per_thread`, `speed_min`/`speed_max`) come from single map runs and are for
+reference only. The exclusive-node timing runs (`timing.tsv`, `timing_runs.tsv`) were all made
+on one node, `phoenix-17`.
 
 ## Minimaxmer prototype (`prototype/`)
 
@@ -397,12 +402,14 @@ comparisons.
   a uniform sample of exactly n reads without replacement (`random.Random(S).sample(range(N), n)`),
   kept in input order; stops unless the input has exactly N four-line records. Writes the
   sampled read names (no sequences) to NAMES.
-- `python3 -I prototype/timing_repeats.py TIMING_DIR JOB_ID ... [--ref mini_k31w20] [--out PREFIX]`:
-  for the given jobs only, each condition's median over rounds of `load_seconds`,
+- `python3 -I prototype/timing_repeats.py results/<reads>/timing_repeats_runs JOB_ID ... [--ref mini_k31w20] [--out PREFIX] [--plot PREFIX]`:
+  for the given jobs only (those Slurm reports as completed), each condition's median over rounds of `load_seconds`,
   `map_seconds` and `reads_per_cpu_second`, divided by the reference's in the same job;
   across jobs the median, quartiles, range, and the fraction of jobs with a ratio above 1.
   For real reads also aligned fraction, MAPQ and identity over all runs, the pooled MAPQ
-  histogram, and `placement.tsv` summed over jobs.
+  histogram, and `placement.tsv` summed over jobs. The same ratios against each condition's density-matched
+  minimizer (`group_ratio_*`), `memory_gb` median and range (`PREFIX_memory.tsv`), and with `--plot` one
+  figure per density group (`PREFIX_d2-11.png`, ...).
 
 ### Analyses of minimaxmers against the 2/11 group
 
@@ -413,7 +420,9 @@ These scripts compare methods read by read (numbers only):
   `density/stage_counts.jsonl`, which `sbatch -o LOG prototype/stage_counts.sh RESULTS_DIR VG
   CONDITION ...` extracts from the density provenance with `vg view -aj | jq` (stage `results`
   counts and the aligner's per-read totals; no timings). Median, mean, p99, total, and an exact sign test against
-  the first method. A hardware-independent stand-in for speed.
+  the first method. It helps explain speed differences but does not replace measured
+  speed: minimaxmers give fewer seeds yet map more slowly, because the cost of looking up
+  the count table is not part of these counts.
 - `prototype/hard_reads.py RESULTS_DIR METHOD ... --selector mini_k31w20`: accuracy and exact
   McNemar tests on the hard reads, the 10% with the most seed hits under a condition that
   is not compared (so the choice favours none), and, where every method has a density run,
@@ -519,3 +528,46 @@ file itself. They were made with
   and rebuilding every index (the `.params` check refuses indexes built on another
   graph path); changing only the reads needs `map`/`density`/`filters`/`collect` with
   `--reads`.
+
+## Known limitations
+
+- **chrY truth is not excluded.** The lab's `gamcompare` runs use `--ignore 'CHM13#0#chrY'`;
+  ours do not. On the 100k set, 354 reads have truth positions only on `CHM13#0#chrY`; every
+  method gets ~19-20% of them wrong (~10-11% of all wrong reads). Without them the wrong
+  reads are minimaxmer 578 against 579 / 598 / 580 for `mini_k31w10` / `sync_k31s21` /
+  `miniW_k31w10`, and every McNemar conclusion stays the same (no test below p = 0.11).
+  The read list is `results/HG002-sim-hifi-100k/truth_chrY_reads.tsv` in the data directory.
+- **Real reads overlap the reads the minimaxmer counts were made from.** The count table
+  (`HG002Revio_full_k31_graph.mmc`, `reads_count`) is built from all 12,800,930 HG002 Revio
+  reads. The random real-read sample `HG002Revio-random100k-s20261027` is 100,000 of those
+  reads (about 0.8%), so a small part of `reads_count` comes from the reads being mapped; the
+  effect is expected to be small. The full real-read timing (`timing --real`) maps all of
+  them. The simulated reads are not affected: they were simulated with pbsim2 from HG002's
+  haplotype sequences (extracted from the graph `hprc-chm-hg002-v2.0.full` with HG002 as the
+  reference sample), with read lengths and quality strings taken from 100k HG002 Revio reads
+  (`--sample-fastq`, `--depth 4 --length-min 10000 --difference-ratio 6:50:54`, per
+  `reads/sim/hifi/HG002/README.txt` and vg's `scripts/make_pbsim_reads.sh`). The count table
+  does not contain their sequences; that counts and simulated reads come from the same person
+  is the design (one index per sample), not a leak.
+- **No centromere-specific accuracy.** There is no list of centromeric HG002 simulated reads.
+  The lab's centromeric list is for CHM13 simulated reads
+  (`reads/sim/hifi/CHM13/CHM13-sim-hifi.centromeric.txt`, 192,312 names), but those reads
+  are no longer where their README puts them. Even with them, minimaxmers could not be run
+  on CHM13 reads, because the counts are HG002's.
+- **Minimaxmers lack Yoshi's step 3 (uniformly sparse thinning).** `vg_minimax` implements
+  steps 1 and 2 on both sides (see "Design: no step 3 in vg"). On the graph, minimizers are
+  chosen on short node-local haplotype windows, while step 3 accepts seeds greedily and
+  blocks their neighbours, so its decisions can depend on seeds far away. They cannot be made
+  consistently on those windows. Step 3 on the read side only is a possible later
+  experiment. As a result, `minimax_k31w20` has about twice the density of `mini_k31w20`
+  (about 2/11), so it is compared with the 2/11 group and not with Yoshi's sparser selection.
+- **Minimaxmers leave about 0.5% more real reads unaligned.** On the random 100k real reads,
+  501 reads are aligned by `mini_k31w10` but not by `minimax_k31w20` (28 the other way). All 495
+  of them with a CHM13 position lie in centromeric satellite arrays (`chm13v2.0_censat_v2.1.bed`:
+  mostly HOR, then hsat2, hsat1A, hsat3), and `mini_k31w10` aligns them mostly with low MAPQ
+  (3 of 501 at MAPQ 60) and identity around 0.95. 372 of them are aligned by both
+  `sync_k31s21` and `miniW_k31w10`, so the loss is mostly specific to minimaxmers. A guess, not
+  tested: in these arrays minimaxmers pick k-mers that occur in only one copy in the graph and
+  not in HG002's copy. On the simulated reads, the extra unaligned reads are almost all
+  reads without a truth position on CHM13, so accuracy is not affected. Tables:
+  `results_summary/HG002Revio-random100k-s20261027/unaligned_reads/`.
