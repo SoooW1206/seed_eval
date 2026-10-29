@@ -29,7 +29,7 @@ Stages:
            index (<graph>.dist next to the .gbz), total graph length
   index    vg minimizer -> indexes/<name>.min + .zipcodes
   map      giraffe -> annotate -> gamcompare -> stats, on --reads; --reps N runs it
-           N times into <name>/rep1..N (for timing), keeping the GAMs of rep1 only
+           N times into <name>/rep1..N (replicates, e.g. for the determinism test), keeping the GAMs of rep1 only
            --run-tag TAG writes <name>/TAG/rep1..N instead; --keep-gams keeps every replicate's GAMs
   density  giraffe --track-provenance on --reads; per-read seed counts
   fingerprint  one small job per run with a mapped.gam: per-read MAPQ, score, identity, start and a
@@ -37,6 +37,10 @@ Stages:
   determinism  (runs locally) compare fingerprints of the --run-tag replicates by read name, and
            separately together with the earlier rep1; writes results/<reads>/determinism/
   filters  one small job: per-filter pass/fail totals and kept minimizers from the density run
+  timing   giraffe only, every --only condition in rotated rounds within one job: exclusive-node jobs
+           into results/<reads>/timing/ (--real: full real-read FASTQ), or with --no-exclusive --jobs N
+           repeated shared-node jobs into results/<reads>/timing_repeats_runs/ (prototype/timing_repeats.py)
+  checksums  (runs locally) record the sha256 of each index's vg binary (and minimaxmer counts) next to it
   collect  (runs locally, no sbatch) parse logs of all stages into
            results/<reads>/results.tsv and results/<reads>/comparison.png;
            --snapshot also copies the summaries to results_summary/<reads>/ in this repo
@@ -454,7 +458,8 @@ def placement_pairs(conditions):
 
 
 def timing_script(conditions, reads, real=False, variant="", exclusive=True, rounds=None, offset=0, sampled=False):
-    """One exclusive job that maps the conditions TIMING_ROUNDS times over, reloading the indexes every run.
+    """One timing job (exclusive node by default) that maps the conditions TIMING_ROUNDS times over, reloading
+    the indexes every run.
     Round r starts offset + r - 1 places further along the given order, so no condition is always first or last.
     Only Giraffe runs; each GAM is deleted once written. Speeds are compared within a job.
     real: full real-read FASTQ, REAL_THREADS threads, one round in the given order; before each GAM is deleted,
@@ -898,8 +903,10 @@ TIMING_SUMMARY_COLUMNS = ["condition", "job_id", "node", "runs", "speed_median",
 
 
 def timing_summary(conditions, reads_set):
-    """One row per condition and timing job: medians over that job's runs, and ratio_vs_ref = this speed median
-    over the reference condition's speed median in the same job (NA if the reference did not run there)."""
+    """One row per condition and exclusive-node timing job (results/<reads>/timing/): medians over that job's
+    runs, and ratio_vs_ref = this reads/s/thread median over the reference (giraffe default) condition's in the
+    same job (NA if the reference did not run there). Not the definition of prototype/timing_repeats.py (ratios
+    against the density-matched minimizer over repeated shared-node jobs), which speed conclusions are based on."""
     names = [c["name"] for c in conditions]
     reference = next((c["name"] for c in conditions if c["density_group"] == REFERENCE_GROUP), None)
     runs = collections.defaultdict(list)
@@ -1234,7 +1241,8 @@ def collect(conditions, reads, snapshot=False):
         (rows if row.get("correct") is not None else skipped).append(row)
     out_dir = DATA_DIR / "results" / reads_set
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Fixed-hardware speed (timing stage): within each job, then summarised over jobs.
+    # Exclusive-node speed (timing stage): within each job, then summarised over jobs. The timed_* columns are
+    # descriptive (reads/s/thread against the reference); speed conclusions come from prototype/timing_repeats.py.
     timing = timing_summary(conditions, reads_set)
     for row in rows:
         jobs = [t for t in timing if t["condition"] == row["name"]]

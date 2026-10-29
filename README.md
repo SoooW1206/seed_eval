@@ -2,7 +2,8 @@
 
 Author: Sophia Tianxiang Wang (rotation in the Paten lab)
 
-This is work in progress; the code and results may change.
+This is a rotation project in the Paten lab (October-November 2026); the code and results are
+those of that period.
 
 A parameterized evaluator for **seed selection schemes in `vg giraffe`** on long reads.
 For each *condition* (one seed-index configuration) it builds the index with
@@ -78,13 +79,20 @@ seed-eval/                      this repo (code + small summaries)
   seed_eval.py                  the driver
   conditions.tsv                one row per condition
   config.example.tsv            template for config.tsv (your paths; not in git)
+  prototype/                    minimaxmer prototype, count-table tool, analysis scripts, tests
+  patches/vg/, patches/gbwtgraph/   minimaxmer patches for vg and GBWTGraph, with their licenses
   results_summary/<reads>/      committed snapshots of the summary tables and plots
+  LICENSE                       MIT
 
 data_dir/                       large files, not in git
   graph.paths_meta.tsv, graph.length.txt   outputs of prepare
   indexes/<name>.min|.zipcodes|.params
+  counts/                       KMC k-mer counts (.kff) and minimaxmer count tables (.mmc)
+  annotation/                   CHM13 annotation BEDs (T2T censat, segmental duplications)
   results/<reads>/<name>/       per-condition map outputs, logs, density/ subdirectory
   results/<reads>/              results.tsv, comparison.png, filter/minimizer summaries
+  results/<reads>/timing/       exclusive-node timing jobs (collect reads these)
+  results/<reads>/timing_repeats_runs/   repeated shared-node timing jobs (timing_repeats.py)
   jobs/                         generated sbatch scripts
   logs/                         Slurm logs
 ```
@@ -169,7 +177,8 @@ What each job runs:
 - **map**: `vg giraffe -p -b hifi -t 16 <giraffe_args> -Z <gbz> -d <dist> -m <min> -z <zipcodes> -G <reads>`,
   then `vg annotate -m --search-limit=-1` (positions on reference paths),
   `vg gamcompare --range 200 -T` against the truth GAM, and `vg stats -a`.
-  With `--reps N` it runs N times into `rep1..N/` (for timing); replicates 2..N
+  With `--reps N` it runs N times into `rep1..N/` (replicates, e.g. for the determinism
+  test); replicates 2..N
   delete their GAMs after their statistics are written. `--run-tag TAG` writes the
   runs to `<name>/TAG/rep1..N/` instead (kept apart from the default runs, which
   `collect` reads), and `--keep-gams` keeps the GAMs of every replicate.
@@ -259,12 +268,12 @@ To test mapping determinism: `map --run-tag det --reps 3 --keep-gams --fixed-nod
 | `seeds_per_read_median`, `seeds_per_read_mean`, `seeds_per_read_p90` | seeds per read (`stage.seed.results`, graph hits of the kept minimizers): median, mean and nearest-rank 90th percentile |
 | `kept_minimizers_per_read` | minimizers left after giraffe's filters, per read |
 | `mean_hits_per_kept_minimizer` | `stage.seed.results / kept minimizers`: how many graph hits each kept minimizer has on average |
-| `timed_jobs` | number of `timing` jobs this condition ran in (`NA` without a timing run) |
-| `timed_speed_median` | median over timing jobs of the per-job median speed (reads/s/thread); descriptive only, since nodes differ |
-| `timed_ratio_min`, `timed_ratio_max` | range over timing jobs of the speed ratio against the `reference` condition **in the same job** |
+| `timed_jobs` | number of exclusive-node `timing` jobs (`results/<reads>/timing/`) this condition ran in (`NA` without one) |
+| `timed_speed_median` | median over those jobs of the per-job median speed (reads/s/thread); descriptive only |
+| `timed_ratio_min`, `timed_ratio_max` | range over those jobs of the reads/s/thread ratio against the `reference` condition (giraffe default) **in the same job**; `NA` in jobs without it |
 | `seeds_per_read_p99`, `seeds_per_read_max` | high end of seeds per read: nearest-rank 99th percentile and maximum (the maximum is one read, so it is noisy); appended after the older columns, which keep their positions |
 
-### timing.tsv (fixed-hardware speed, written when timing runs exist)
+### timing.tsv (exclusive-node speed, written when timing runs exist)
 
 One row per condition and timing job: `node`, `runs`, `speed_median`/`speed_min`/`speed_max`
 (reads/s/thread), `ratio_vs_ref` (this median ÷ the reference condition's median in the
@@ -272,12 +281,17 @@ same job), and medians of reads per CPU-second, load seconds and map seconds, pl
 largest giraffe memory footprint. Runs that did not finish are left out. Compare speeds
 within a job; `--snapshot` copies this file too.
 
+These exclusive-node numbers (`timing.tsv` and the `timed_*` columns of `results.tsv`) use
+reads/s/thread against the giraffe default, a different definition from
+`prototype/timing_repeats.py` (load, map and reads per CPU-second against the density-matched
+minimizer, over repeated shared-node jobs). Speed conclusions are based on `timing_repeats`.
+
 `timing_runs.tsv` concatenates every job's `runs.tsv` (one row per run). For real reads,
 `placement.tsv` concatenates the jobs' placement tables: per job and pair, `reads`,
 `aligned_both`, `aligned_only_condition`, `aligned_only_against`, `different_start` (reads
 aligned by both whose first node or strand differs), and among those
 `higher_score_condition`, `higher_score_against`, `equal_score`. A real read set has no
-truth, so its `results.tsv` and `mcnemar.tsv` are empty.
+truth, so `collect` writes no `results.tsv` or `mcnemar.tsv` for it (only the timing tables).
 
 ### Plots
 
@@ -340,7 +354,7 @@ on one node, `phoenix-17`.
 
 ## Minimaxmer prototype (`prototype/`)
 
-Work in progress. `prototype/minimaxmer.py` is a Python prototype of minimaxmer
+`prototype/minimaxmer.py` is a Python prototype of minimaxmer
 selection (Yoshi Suzuki's [himapper_rp](https://github.com/yoshihikosuzuki/himapper_rp)):
 in each window of `w` k-mers it picks the minimum of
 `(genome_count, -reads_count, hash)`, i.e. a k-mer rare in the genome and common in the
@@ -442,6 +456,19 @@ Their outputs are in `results_summary/HG002-sim-hifi-10k/` (`stage_work.tsv`,
 `hard_reads.tsv`, `mapq.tsv`, `pr.png`) and `results_summary/HG002-sim-hifi-100k/`
 (`hard_reads.tsv`, `mapq.tsv`, `pr.png`, `error_by_seed_decile.png`, `mapq60_reads.tsv`, `mapq60_summary.tsv`).
 
+### Development checks
+
+Three small scripts were used only while developing and are not part of any stage or analysis
+(numbers only):
+
+- `prototype/compare_gam_json.py A.json B.json`: compares two `vg view -aj` outputs read by
+  read, ignoring timing fields (used to check that two runs or builds give the same alignments).
+- `prototype/density_table.py --baseline DENSITY_SUMMARY.tsv MODE=PER_READ.tsv:SUMMARY.txt ...`:
+  a table of the prototype's measured density per counting mode against a baseline condition's
+  density run (the 1k density comparison of minimaxmer count modes).
+- `prototype/kff_header.py FILE.kff`: prints the header fields of a KFF file (k, max, min,
+  data_size), to check the KMC output before building the count table.
+
 ### Count table (`prototype/minimax_counts.cpp`)
 
 The counts minimaxmer selection needs, for every canonical k-mer in the graph:
@@ -536,7 +563,7 @@ modified. The counts file is written by `prototype/minimax_counts.cpp` (see "Cou
 - **The `hifi` preset turns giraffe's explored MAPQ cap off** (`explored-cap false` in
   vg's `giraffe_main.cpp`). That cap is the only place giraffe treats a minimizer's
   hash as a uniform random number (`get_prob_of_disruption_in_column`), so a scheme that
-  changes the hash values (weighted minimizers, the planned minimaxmers) breaks no
+  changes the hash values (weighted minimizers, minimaxmers) breaks no
   assumption of giraffe's MAPQ under `-b hifi`; with presets that use the cap, that
   MAPQ cap would be computed from non-uniform hashes.
 - **Mapping was deterministic in our test** (`results_summary/HG002-sim-hifi-100k/determinism_summary.tsv`):

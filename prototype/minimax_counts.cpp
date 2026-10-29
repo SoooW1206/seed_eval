@@ -1,4 +1,4 @@
-// Minimaxmer milestone 1: the count table minimaxmer selection needs, for every canonical k-mer in the graph.
+// The count table minimaxmer selection needs, for every canonical k-mer in the graph.
 // Minimaxmers come from Yoshi Suzuki's himapper_rp (https://github.com/yoshihikosuzuki/himapper_rp).
 //
 //   genome_count  number of distinct graph positions of the k-mer over all haplotypes: the count that
