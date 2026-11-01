@@ -41,12 +41,13 @@ Stages:
            into results/<reads>/timing/ (--real: full real-read FASTQ), or with --no-exclusive --jobs N
            repeated shared-node jobs into results/<reads>/timing_repeats_runs/ (prototype/timing_repeats.py)
   checksums  (runs locally) record the sha256 of each index's vg binary (and minimaxmer counts) next to it
-  collect  (runs locally, no sbatch) parse logs of all stages into
-           results/<reads>/results.tsv and results/<reads>/comparison.png;
-           --snapshot also copies the summaries to results_summary/<reads>/ in this repo
+  collect  (runs locally, no sbatch) parse logs of all stages into results/<reads>/: results.tsv,
+           mcnemar.tsv, comparison.png, density_sweep.png, and timing.tsv, timing_runs.tsv,
+           placement.tsv when timing jobs exist; --snapshot also copies them to
+           results_summary/<reads>/ in this repo
 
 Index provenance: each index job writes indexes/<name>.params (vg binary and
-version, index_args, graph). index/map/density refuse to run, both when
+version, index_args, graph). index/map/density/timing refuse to run, both when
 generating scripts and again inside the job, if that file disagrees with the
 condition's row, so a row whose index_args changed without a new name cannot
 silently reuse an old index.

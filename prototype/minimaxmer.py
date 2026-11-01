@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prototype of minimaxmer selection (Yoshi Suzuki's himapper_rp), steps 1-2 only.
+"""Prototype of minimaxmer selection (Yoshi Suzuki's himapper_rp): steps 1-2, and step 3 with --rspace.
 
 A minimaxmer is chosen like a minimizer, but each k-mer is ranked by the key
     (genome_count ascending, reads_count descending, hash ascending)
@@ -32,10 +32,11 @@ window buffer, the window still slides, and a window with no candidate selects n
 
 Command line (statistics only, never sequences):
     vg view -aj reads.gam | jq -r '[.name, .sequence] | @tsv' | python3 -I minimaxmer.py --k 31 --w 20
-reads "name<TAB>sequence" lines, counts the k-mers of all reads for reads_count
-(or uses a constant reads_count with --constant-counts), uses a constant
-genome_count of 1, writes per-read selection counts (--per-read FILE: read name,
-length, selected) and prints a summary.
+reads "name<TAB>sequence" lines, writes per-read selection counts (--per-read FILE: read name,
+length, selected) and prints a summary. Counts: with --counts-mmc FILE, genome_count and
+reads_count come from a minimax_counts table (k-mers not in it are not candidates), and
+--reads-mode bins / constant coarsens or ignores reads_count. Without it, genome_count is 1 and
+reads_count is counted from all input reads (or is constant with --constant-counts).
 """
 import argparse
 import collections

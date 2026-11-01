@@ -5,7 +5,7 @@ Usage: python3 -I stage_work.py RESULTS_DIR CONDITION ... [--against NAME] [--ou
 
 Reads RESULTS_DIR/<condition>/density/stage_counts.jsonl (one JSON object per read: read name, every
 annotation.stage.<path>.results count and the aligner's per-read totals, written by
-jobs/stage_counts_10k.sbatch). For every metric: median, mean, nearest-rank p99 and total per condition,
+prototype/stage_counts.sh). For every metric: median, mean, nearest-rank p99 and total per condition,
 and, against --against (default: the first condition), how many reads have less / the same / more work,
 with a two-sided exact sign test. aligner.bases is middle + tail bases aligned. Prints numbers only.
 """
