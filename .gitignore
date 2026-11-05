@@ -1,0 +1,14 @@
+handoff/
+*.gam
+*.gbz
+*.min
+*.dist
+*.zipcodes
+*.fa
+*.fq
+*.fastq
+*.mmc
+*.kff
+*.gz
+__pycache__/
+config.tsv

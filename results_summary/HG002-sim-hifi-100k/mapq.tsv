@@ -1,0 +1,6 @@
+reads_set	condition	eligible	mapq_0	mapq_1_9	mapq_10_29	mapq_30_59	mapq_60	wrong_mapq_0	wrong_mapq_1_9	wrong_mapq_10_29	wrong_mapq_30_59	wrong_mapq_60	kept_mapq_ge60	kept_mapq_ge30	kept_mapq_ge1	wrong_mapq_ge60	wrong_mapq_ge30	wrong_mapq_ge1	wrong_at_60_only_minimax_k31w20	wrong_at_60_only_this	wrong_at_60_both	p_wrong_at_60
+HG002-sim-hifi-100k	minimax_k31w20	93392	10	1933	208	3508	87733	9	543	50	28	20	87733	91241	93382	20	48	641				
+HG002-sim-hifi-100k	mini_k31w10	93392	1	2044	316	3532	87499	1	566	41	26	11	87499	91031	93391	11	37	644	10	1	10	0.012
+HG002-sim-hifi-100k	sync_k31s21	93392	1	2048	318	3533	87492	1	584	40	29	14	87492	91025	93391	14	43	667	7	1	13	0.07
+HG002-sim-hifi-100k	miniW_k31w10	93392	1	2046	312	3533	87500	1	566	38	30	10	87500	91033	93391	10	40	644	10	0	10	0.002
+HG002-sim-hifi-100k	mini_k31w20	93392	0	2084	459	3575	87274	0	575	48	24	8	87274	90849	93392	8	32	655	12	0	8	0.00049
