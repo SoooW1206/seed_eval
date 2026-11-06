@@ -25,8 +25,11 @@ Current setup (Paten lab rotation, Oct 2026):
 
 ## Requirements
 
-- A built `vg` (tested with `v1.77.0-26-gc91cc1d91`). Keep a fixed copy for
-  experiments (e.g. `~/bin/vg_baseline`); do not replace a binary that running jobs use.
+- vg built from the `minimaxmer` branch of [SoooW1206/vg](https://github.com/SoooW1206/vg), see
+  "Minimaxmer vg" below. The results in `results_summary/` used official vg `c91cc1d91` for
+  minimizers, closed syncmers and weighted minimizers, and the `minimaxmer` branch for
+  minimaxmers. Keep a fixed copy for experiments (e.g. `~/bin/vg_baseline`); do not replace
+  a binary that running jobs use.
 - Slurm (`sbatch`, `sacct`) for everything heavy. Most jobs use the `medium` partition
   with 16 threads. `filters` and the two small `prepare` jobs use `short`, `fingerprint`
   uses 2 CPUs, and `timing --real` uses `long` with 64 threads.

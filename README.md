@@ -9,9 +9,18 @@ Details of every stage, column and output: [docs/DETAILS.md](docs/DETAILS.md).
 
 ## Using seed-eval
 
-Needs `vg`, Slurm, Python 3.9+ with matplotlib, and `jq`. Copy `config.example.tsv` to
-`config.tsv` and fill in the paths. Put one row per seed index in `conditions.tsv`. Then run
-the stages in order, waiting for each stage's jobs to finish:
+Needs vg built from the `minimaxmer` branch of [SoooW1206/vg](https://github.com/SoooW1206/vg)
+(official vg `c91cc1d91` plus the optional `--minimaxmer-counts`; without that option it is
+standard vg, so one build runs every method):
+
+    git clone --recursive -b minimaxmer https://github.com/SoooW1206/vg.git && cd vg && make -j 16
+
+Without `--minimaxmer-counts` its mappings are read-by-read identical to official vg `c91cc1d91`
+(checked on 10k simulated reads for minimizers, closed syncmers and weighted minimizers).
+
+Also needs Slurm, Python 3.9+ with matplotlib, and `jq`. Copy `config.example.tsv` to
+`config.tsv` and fill in the paths, including the `vg` binary. Put one row per seed index in
+`conditions.tsv`. Then run the stages in order, waiting for each stage's jobs to finish:
 
 ```bash
 python3 seed_eval.py prepare --submit                    # distance index, once per graph
@@ -46,8 +55,7 @@ vg has no thinning. `-w 20` minimaxmers then select about as many k-mers per bas
 minimizers (density about 2/11). `prototype/minimaxmer.py` has all three steps.
 
 To run them: count the reads' k-mers with KMC, build the count table with
-`prototype/minimax_counts.cpp`, build `vg_minimax`
-(`git clone --recursive -b minimaxmer https://github.com/SoooW1206/vg.git`, then build as in vg's README),
+`prototype/minimax_counts.cpp`, build `vg_minimax` (see Using seed-eval above),
 and give the same counts file to both `vg minimizer` and `vg giraffe` with `--minimaxmer-counts` in
 `conditions.tsv` (details: [count table](docs/DETAILS.md#count-table-prototypeminimax_countscpp),
 [vg_minimax](docs/DETAILS.md#minimaxmer-vg-vg_minimax)).
