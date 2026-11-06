@@ -15,6 +15,10 @@ standard vg, so one build runs every method):
 
     git clone --recursive -b minimaxmer https://github.com/SoooW1206/vg.git && cd vg && make -j 16
 
+Install vg's build dependencies first (see vg's README). `--recursive` also fetches the modified
+GBWTGraph (`deps/gbwtgraph` points to the `minimaxmer` branch of SoooW1206/gbwtgraph); do not
+replace it with official GBWTGraph.
+
 Without `--minimaxmer-counts` its mappings are read-by-read identical to official vg `c91cc1d91`
 (checked on 10k simulated reads for minimizers, closed syncmers and weighted minimizers).
 

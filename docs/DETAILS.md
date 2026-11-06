@@ -537,7 +537,7 @@ on vg commit `c91cc1d91` (`vg minimizer` and `vg giraffe --minimaxmer-counts`). 
 `7fac0af` (minimaxmer selection, `include/gbwtgraph/minimax.h`), which is the GBWTGraph commit
 vg `c91cc1d91` pins. The minimaxmer changes are vg commit `016050140` and GBWTGraph commit
 `c8552dd`; the vg branch head `ddcc8796c` only points the submodule URL to the GBWTGraph fork.
-To build:
+To build (install vg's build dependencies first, see vg's README):
 
 ```bash
 git clone --recursive -b minimaxmer https://github.com/SoooW1206/vg.git vg_minimax && cd vg_minimax
